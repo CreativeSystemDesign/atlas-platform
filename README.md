@@ -97,9 +97,9 @@ Depth: **[ARCHITECTURE.md](ARCHITECTURE.md)** · **[TRUST-MODEL.md](TRUST-MODEL.
 
 Arc is the AI industrial engineer resident in every surface. Durability is architecture, not policy: every artifact — graphs, seals, tables, lessons — persists to the database of record, so nothing lives in one fragile place.
 
-What makes Arc different isn't capability. It's **education with an audit trail** — a five-stage loop: **Teach → Mine → Attack → Certify → Enforce.**
+What makes Arc different isn't capability. It's **education with an audit trail** — and to be clear about who does what: **this education happened in-house, at Atlas-Platform, run by the founding engineer during the platform's development. Customers don't train Arc. They receive the engineer already educated.** The pipeline is a five-stage loop: **Teach → Mine → Attack → Certify → Enforce.**
 
-- **Teach:** the expert just works — corrections and rulings land in the session stream as ordinary conversation.
+- **Teach:** our expert just works — corrections and rulings land in the session stream as ordinary conversation.
 - **Mine:** a deterministic distiller separates the expert's *verbatim words* from machine noise; finder agents extract candidate lessons, each required to carry the human's actual quoted sentence. Paraphrase is rejected outright.
 - **Attack:** an adversarial skeptic tries to refute every candidate — grounding and worthiness, *default reject on doubt*.
 - **Certify:** the pipeline ends at a slate a human walks. Nothing self-promotes to law — the same discipline the platform applies to data, applied to the AI's own mind.

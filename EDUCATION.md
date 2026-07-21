@@ -9,7 +9,7 @@ This is the platform's deepest differentiator, so it deserves a full accounting.
 ## The loop: Teach → Mine → Attack → Certify → Enforce
 
 ### 1. Teach
-Every supervised session is a lesson in the raw. The human expert works a real document next to Arc — correcting a wrong box, explaining that a right-margin note describes the circuit to its *left*, ruling that a crossed-out row is supersession rather than deletion. Those rulings land in the session stream as ordinary conversation. The expert never writes doctrine; they just work, and the working *is* the teaching.
+Every supervised session is a lesson in the raw. Our expert — a maintenance engineer with twenty-plus years on the plant floor — works a real document next to Arc: correcting a wrong box, explaining that a right-margin note describes the circuit to its *left*, ruling that a crossed-out row is supersession rather than deletion. Those rulings land in the session stream as ordinary conversation. The expert never writes doctrine; they just work, and the working *is* the teaching.
 
 ### 2. Mine
 A deterministic distiller sweeps the session streams and separates the expert's **verbatim words** from machine-generated noise — the single most important rule of the pipeline. Each session becomes a compact run card: what the human actually said, what Arc did before and after each ruling, what was already codified live. Then finder agents fan out, one per run card, extracting candidates in three shapes:
@@ -57,7 +57,7 @@ The lever gets longer with every session — and the expert's role moves up, fro
 
 ## Why publish the method?
 
-Because the method isn't the moat — the *education* is. The pipeline without an expert's twenty years and hundreds of supervised sessions is an empty flywheel. What a machine's documentation teaches Arc belongs to that machine's owner: files on disk, not weights in a model — auditable, portable, and deletable. We publish the method for the same reason we publish the certification machinery: a platform whose premise is auditability should be auditable about how its AI comes to know what it knows.
+Because the method isn't the moat — the *education* is. The pipeline without an expert's twenty years and hundreds of supervised sessions is an empty flywheel. And the form the education takes matters for trust: lessons are files, not weights — auditable, portable, deletable, and never entangled with any customer's data. We publish the method for the same reason we publish the certification machinery: a platform whose premise is auditability should be auditable about how its AI comes to know what it knows.
 
 ---
 
