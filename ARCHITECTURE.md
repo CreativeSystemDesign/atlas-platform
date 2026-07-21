@@ -50,4 +50,4 @@ Join evidence is computed by one engine with two implementations locked in parit
 
 ## Deployment
 
-Single-box friendly: FastAPI + Next.js as long-running services, PostgreSQL as the database of record, static marketing page served separately. Local caches exist for offline work; the database is always the source of truth — a lesson inherited from the first Arc, an autonomous predecessor agent lost with a breached VM. Nothing lives in one fragile place.
+Single-box friendly: FastAPI + Next.js as long-running services, PostgreSQL as the database of record, static marketing page served separately. Local caches exist for offline work; the database is always the source of truth. Nothing lives in one fragile place.

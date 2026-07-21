@@ -87,7 +87,7 @@ Depth: **[ARCHITECTURE.md](ARCHITECTURE.md)** · **[TRUST-MODEL.md](TRUST-MODEL.
 
 ## Arc — the resident engineer, and how it was educated
 
-Arc is the AI industrial engineer resident in every surface — and the name carries history: the *first* Arc was an autonomous agent that proved the concept in early 2026 and was lost with a breached VM. Its hard-won lesson is now architecture: **nothing lives in one fragile place.** Every artifact — graphs, seals, tables, lessons — persists to the database of record.
+Arc is the AI industrial engineer resident in every surface. Durability is architecture, not policy: every artifact — graphs, seals, tables, lessons — persists to the database of record, so nothing lives in one fragile place.
 
 What makes Arc different isn't capability. It's **education with an audit trail**:
 
