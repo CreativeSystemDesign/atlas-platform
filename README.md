@@ -29,7 +29,7 @@ When your plant's own records are available — **at your direction** — Atlas-
 
 The knowledge exists — trapped in thousands of pages of scanned schematics, cable lists, terminal-box drawings, and parts catalogs that only the most senior people can navigate. Every retirement takes that navigation skill out the door.
 
-CAD serves design. CMMS serves work orders. Document management serves storage. Chat-with-your-PDF serves summaries — text *about* documents, unanchored, a liability at a live panel. **Nobody serves the answer.** That gap is this product.
+Survey the industrial software world as it stands today: CAD serves design. CMMS serves work orders. Document management serves storage. Chat-with-your-PDF serves summaries — text *about* documents, unanchored, a liability at a live panel. **Nobody serves the answer.** That gap is this product.
 
 ## The core bet: extract once, query forever
 
