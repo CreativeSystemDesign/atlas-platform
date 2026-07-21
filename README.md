@@ -99,7 +99,7 @@ Arc is not an AI agent wearing an engineer costume. There is no system prompt th
 
 What makes Arc different isn't capability. It's **education with an audit trail** — and to be clear, the education runs a five-stage loop: **Teach → Mine → Attack → Certify → Enforce.**
 
-- **Teach:** our expert just works — corrections and rulings land in the session stream as ordinary conversation.
+- **Teach:** human-supervised working sessions — our expert works real documents beside Arc, and corrections and rulings land in the session stream as ordinary conversation. No dataset labeling, no annotation project: the work itself is the training data.
 - **Mine:** a deterministic distiller separates the expert's *verbatim words* from machine noise; finder agents extract candidate lessons, each required to carry the human's actual quoted sentence. Paraphrase is rejected outright.
 - **Attack:** an adversarial skeptic tries to refute every candidate — grounding and worthiness, *default reject on doubt*.
 - **Certify:** the pipeline ends at a slate a human walks. Nothing self-promotes to law — the same discipline the platform applies to data, applied to the AI's own mind.
