@@ -2,6 +2,14 @@
 
 **Turn your machine documentation into data that answers *which breaker, which wire, which page, which spare* — in seconds.**
 
+> *"Give me a lever and a fulcrum, and I shall move the world."* — Archimedes
+>
+> **The lever is Arc** — the resident AI industrial engineer, and the reason for the name: educated by human-blessed lessons, it gets longer with every session. Force, multiplied.
+>
+> **The fulcrum is the platform** — Certified data, provenance to the exact printed mark, laws enforced in code. A fixed point that doesn't slip under load.
+>
+> **The world is the gap** — decades of machine knowledge trapped in PDFs on every plant floor, walking out the door with every retirement. Too heavy to lift. Ready to be moved.
+
 Atlas-Platform ingests the PDFs behind an industrial machine — schematics, cable lists, terminal-box wiring, parts catalogs, PLC references, error lists — and builds **a digital twin of the documentation, and through it, the machine**: Certified relational data and a queryable graph with provenance down to the exact printed mark, complete enough that the schematic can be redrawn from the data alone.
 
 **Live page:** [atlas-platform.cloud](https://atlas-platform.cloud) · **This repo, rendered:** [creativesystemdesign.github.io/atlas-platform](https://creativesystemdesign.github.io/atlas-platform/) · **Status:** pre-launch, working platform, [early access open](https://atlas-platform.cloud/#contact)
