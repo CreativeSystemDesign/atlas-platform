@@ -1,58 +1,149 @@
 # Atlas-Platform
 
-**Turn industrial machine documentation into Certified, queryable data — a digital twin of the documentation, and through it, the machine.**
+**Turn your machine documentation into data that answers *which breaker, which wire, which page, which spare* — in seconds.**
 
-This is the source of a working platform, published for review. Not a framework, not a demo scaffold — the actual code that ingests decades-old machine PDFs (schematics, cable lists, terminal-box drawings, parts catalogs, PLC references) and turns them into a relational + graph twin where every fact carries the coordinates of the printed ink it came from.
+Atlas-Platform ingests the PDFs behind an industrial machine — schematics, cable lists, terminal-box wiring, parts catalogs, PLC references, error lists — and builds **a digital twin of the documentation, and through it, the machine**: Certified relational data and a queryable graph with provenance down to the exact printed mark, complete enough that the schematic can be redrawn from the data alone.
 
-**The live page:** [atlas-platform.cloud](https://atlas-platform.cloud) · **This repo, rendered:** the same page is served from [`/docs`](docs/) via GitHub Pages.
+**Live page:** [atlas-platform.cloud](https://atlas-platform.cloud) · **This repo, rendered:** [creativesystemdesign.github.io/atlas-platform](https://creativesystemdesign.github.io/atlas-platform/) · **Status:** pre-launch, working platform, [early access open](https://atlas-platform.cloud/#contact)
 
-> **Status:** pre-launch, in active development, proven end to end against a complete real-world industrial corpus (60+ documents, 2,700+ pages, bilingual, scanned and vector). Early access is open — [get on the list](https://atlas-platform.cloud/#contact).
+![The 3D machine graph — annotated schematic sheets rendered in one navigable space, components as solids, conductors colored by electrical class, cross-sheet continuations riding harness-routed ribbons](docs/assets/machine-graph.png)
+*Nothing in this scene is a picture. Every slab, block, and wire is extracted data re-rendered — the reconstruction proof, live.*
 
 ---
 
-## Why publish the source?
+## The 2 AM problem
 
-Because the entire premise of this platform is **auditability** — every extracted fact traceable to the printed mark it came from — and a company selling auditability should let you audit the software itself. Marketing pages make claims. Source code keeps them.
+This platform was built by a maintenance engineer, not a software company. Twenty-plus years on a plant floor, living by two numbers — **MTTR** and **MTBF** — produced one observation that wouldn't go away:
 
-## The laws, kept in code
+> When a machine goes down, the physical fix is usually minutes. The **hour** goes to the hunt: *which* breaker, *which* wire number, *which* page of *which* manual, and is there a spare on the shelf. Almost all of diagnosis time is **documentation time**. Fix the documentation problem and you fix the whole metric.
 
-The platform's AI works under laws that hold it to the print. On the marketing page they're prose; here they're checkable:
+The knowledge exists — trapped in thousands of pages of scanned schematics, cable lists, terminal-box drawings, and parts catalogs that only the most senior people can navigate. Every retirement takes that navigation skill out the door.
+
+CAD serves design. CMMS serves work orders. Document management serves storage. Chat-with-your-PDF serves summaries — text *about* documents, unanchored, a liability at a live panel. **Nobody serves the answer.** That gap is this product.
+
+## The core bet: extract once, query forever
+
+An LLM answering over a pile of PDFs does the hard work **at query time, every time** — re-reading and re-reasoning across the whole document set per question. Atlas moves the heavy reasoning to **ingestion**, once per document, and lets every question after that compose already-extracted facts:
+
+| | Chat-over-PDFs | Atlas |
+|---|---|---|
+| When the hard work happens | At **query time**, every time | Once, at **ingestion** |
+| Latency | ~10–20 min for full-set reasoning | **Seconds** |
+| Cost | Recurring, grows with every question | Paid once per document |
+| Answers | Plausible prose | **Quoted, verifiable facts** |
+| Provenance | Reconstructed, weak | **First-class** — document → page → printed mark |
+
+This wasn't a whiteboard theory. It came out of two years of honest experiments: an AI notebook per production line (fine for overviews, no better than a web search on a specific fault), then full-corpus context caching against a frontier model (real answers — at 10–20 minutes and untenable cost per question). The realization: *to produce better answers, provide better input.* A prototype that extracted a few pages into structured tables returned **sub-second answers quoting real data** — and that bet became this platform.
+
+## The trace — the whole product in one story
+
+A technician is chasing a fault and has one clue: a wire label off the schematic. Because of a documented naming convention, a label like `X····` already tells you it's a **PLC input** before you look anything up. Then every hop is a *printed fact* in some document, and Atlas has already joined them:
+
+```
+wire label  (from the schematic — the cheapest, first thing extracted)
+  ├─ cable list        → which cable carries it, origin → termination      [cited page]
+  ├─ terminal diagrams → where it lands — enclosure, strip, terminal       [cited page]
+  ├─ schematic graph   → which component pins it connects, electrically    [cited region]
+  ├─ parts list        → the component's part number and spec              [cited row]
+  │     └─ inventory   → in stock? where? substitute?                      [cited record]
+  └─ PLC references    → the signal's plain-English meaning                [cited row]
+        ├─ cross-reference → every program rung that reads it              [cited page]
+        └─ error list      → the fault it drives, and the corrective action[cited row]
+```
+
+**Every line cites its source.** No hop is model inference — each is a documented table or geometry lookup. That's what makes the answer trustworthy at a live panel, and it's the payoff every other design decision serves.
+
+## The structural insight that makes it tractable
+
+A machine's documentation is not a hundred unrelated files. It's **one core artifact — the schematic — surrounded by documents that join back to it** on keys both already print: wire labels, component marks, part numbers, terminal points, alarm codes. A star schema, with the schematic as the fact table.
+
+That collapses the "impossible" problem into a tractable one: **get the schematic into a graph correctly, and everything else is a join.** Components as nodes, terminals as ports, wires as edges — annotated as an overlay on the original print, never a redraw.
+
+## The working surfaces
+
+| | |
+|---|---|
+| ![Smart Canvas — a Certified schematic sheet with its logic-graph overlay: components, terminals, and wires annotated over the original print](docs/assets/smart-canvas.png) | ![Document extraction — a wiring document becoming draft tables, a thousand-plus connection rows awaiting a human's Certify](docs/assets/gap-extraction.png) |
+| **Smart Canvas** — the schematic becomes a logic graph drawn over the original print, every element snapped to the printed geometry beneath. The platform annotates; you view, step through, and edit — every annotation anchored to the ink it came from. | **Document extraction** — tabular documents become tables that mirror the printed page, row for row. The AI extracts page by page; a human verifies; Certified tables seal read-only with provenance to every row. |
+| ![The Data Map — extraction tables as cards, wired field-to-field with live match-rate evidence](docs/assets/gap-schema.png) | ![Arc mid-session — a fix applied, the lesson codified, the audit run clean](docs/assets/canvas-live.png) |
+| **The Data Map** — documents join on identifiers they already print. Every proposed join carries live match evidence measured against the actual data (e.g. *155 of 166 values match exactly*) — proposed with proof, ruled by a person. | **Arc, the resident AI engineer** — works every surface, drafts annotations and tables, audits its own output from fresh pixels, and cannot certify its own work. More below. |
+
+## The AI works under law
+
+Every AI-extraction product asks you to trust its model. Atlas is built the other way around: the AI operates under laws that hold it to the print — **enforced in code, not policy prose.** That's also why this repo exists: a platform whose premise is auditability should let you audit the software.
 
 | Law | Where the code enforces it |
 |---|---|
-| **AI drafts. A person seals.** Certified data seals read-only; the platform refuses every mutation — from the AI or anyone else — until a human deliberately unseals. | [`agent_server/src/persistence/certification.py`](agent_server/src/persistence/certification.py) — append-only, checksummed seal snapshots with drift verification · [`agent_server/src/extraction_data.py`](agent_server/src/extraction_data.py) — certified tables refuse writes (HTTP 409), including the AI's own write tools |
-| **The platform can never claim what isn't its own.** Extractions are mechanically barred from adopting or altering foreign tables. | [`agent_server/src/extraction_data.py`](agent_server/src/extraction_data.py) (`assert_claimable`) + the shared denylist in [`agent_server/src/data_sources.py`](agent_server/src/data_sources.py) |
-| **Detection never gates.** Vision-model detections are evidence with a hard ceiling — they inform, and are structurally barred from blocking or gating any result. | [`agent_server/src/canvas_copilot/audit.py`](agent_server/src/canvas_copilot/audit.py) — detector-fed audit rules are capped at INFO severity |
-| **Joins are proposed with proof, ruled by a person.** The AI measures a relationship against live data and proposes; it cannot draw, accept, or dismiss. | [`agent_server/src/canvas_copilot/data_map_tools.py`](agent_server/src/canvas_copilot/data_map_tools.py) — the propose-only seat contract |
-| **Same matching truth everywhere.** The SQL matching engine and its Python reference implementation are locked in parity by test. | [`agent_server/tests/test_norm_parity.py`](agent_server/tests/test_norm_parity.py) |
+| **AI drafts. A person seals.** Certified data seals read-only; the platform refuses every mutation — from the AI or anyone else — until a human deliberately unseals. | [`certification.py`](agent_server/src/persistence/certification.py) — append-only, checksummed seal snapshots; if Certified data ever drifts, an alarm trips · [`extraction_data.py`](agent_server/src/extraction_data.py) — Certified tables refuse writes (HTTP 409), including the AI's own write tools |
+| **Rows are the print's; columns are ours.** A table's rows only ever mirror what the document enumerates. AI may enrich with evidence-cited columns; it may never invent a row the print doesn't show. | The Grain Law — carried in every extraction agent's instructions, checked at the audit layer |
+| **Document truth over engineering truth.** If the manufacturer's print is wrong, the data preserves the wrongness faithfully — corrections are a separate, labeled layer, never silently blended in. | The faithfulness contract across the extraction pipeline |
+| **The reconstruction rule.** No extracted schematic fact is trusted until it can be drawn back onto the original page render in the correct place. Validation overlays are verification artifacts, not UI polish. | Render-pixel geometry preserved on every schematic object; the 3D graph *is* this rule made visible |
+| **Detection never gates.** Vision-model detections are evidence with a hard ceiling — they inform, and are structurally barred from blocking any result. | [`audit.py`](agent_server/src/canvas_copilot/audit.py) — detector-fed audit rules are capped at INFO severity |
+| **The platform can never claim what isn't its own.** Extractions are mechanically barred from adopting or altering foreign tables. | [`extraction_data.py`](agent_server/src/extraction_data.py) (`assert_claimable`) + the shared denylist in [`data_sources.py`](agent_server/src/data_sources.py) |
+| **Joins are proposed with proof, ruled by a person.** The AI measures a candidate relationship against live data and proposes; it cannot draw, accept, or dismiss. | [`data_map_tools.py`](agent_server/src/canvas_copilot/data_map_tools.py) — the propose-only seat contract |
+| **Same matching truth everywhere.** The SQL matching engine and its Python reference implementation are locked in parity by test. | [`test_norm_parity.py`](agent_server/tests/test_norm_parity.py) |
 
-*(A historical note you'll find in the schema: the certification tables carry the legacy identifier `gold_sealed_annotations` — the trust tier was renamed "Certified" but stored identifiers keep their names, because renaming an append-only archive would be exactly the kind of history rewriting this platform exists to refuse.)*
+Depth: **[ARCHITECTURE.md](ARCHITECTURE.md)** · **[TRUST-MODEL.md](TRUST-MODEL.md)**
+
+## Arc — the resident engineer, and how it was educated
+
+Arc is the AI industrial engineer resident in every surface — and the name carries history: the *first* Arc was an autonomous agent that proved the concept in early 2026 and was lost with a breached VM. Its hard-won lesson is now architecture: **nothing lives in one fragile place.** Every artifact — graphs, seals, tables, lessons — persists to the database of record.
+
+What makes Arc different isn't capability. It's **education with an audit trail**:
+
+- **First attempt ever** at annotating a schematic page: three boxes, roughly half right.
+- Every supervised session since is **mined for lessons** — a pipeline that separates the human's actual rulings from machine noise, extracts candidate doctrine, **adversarially attacks each candidate** (a skeptic per lesson, default reject), dedups against existing law, and presents survivors for human blessing. Nothing self-promotes to law.
+- **260+ lessons** have been codified this way — how to read ditto marks, fold continuation rows, treat blank cells as a three-way distinction, survive mistranslated bilingual headers, respect print conventions the drafter assumed everyone knew.
+- Today, Arc annotates **entire schematic pages autonomously**, and recent pages have passed human certification **without a single correction at the seal**.
+
+The human's role didn't disappear — it moved up. AI does the labor; the person is the authority. And every audit rule Arc works under was *earned*: rules are born as warnings and promoted to errors only after calibration against human-certified pages with zero false positives.
+
+## The detection stack — geometry, not pixels
+
+Schematics are born-digital vector data, and Atlas exploits that directly:
+
+- **Vector fingerprinting** — label a symbol once, and a distance-signature over the actual CAD geometry finds every instance across the drawing set, tolerant of rotation and mirroring. In proving runs, a single hand-marked example located its siblings across pages in seconds — matching the human's box to **within one pixel**. One machine schematic's vector layer alone carries over 100,000 printed primitives, each readable as exact geometry: *"is this wire on that terminal"* becomes arithmetic, not eyeballing.
+- **A vision detector** trained on industrial drawings proposes component locations across 55 symbol classes — as evidence only, structurally barred from gating anything (that's law, above).
+- **Text anchors first.** The cheapest extraction — text with coordinates — is also the highest-leverage: wire labels following documented PLC conventions hand you a large slice of the control graph from OCR alone, before any geometry work.
+
+## Proven end to end
+
+Against a complete real-world industrial corpus — thousands of bilingual pages, scanned and vector, cross-referenced by convention, exactly as machine documentation actually ships:
+
+**60+ documents · 2,700+ pages · 200+ schematic sheets · 1,200+ conductors extracted from a single cable list, every one human-verified · 2,800+ Certified rows sealed · 260+ codified extraction lessons · joins measured against live data before they become law**
 
 ## What's in here
 
 ```
 agent_server/       FastAPI backend — extraction pipeline, certification machinery,
-                    the audit engine, and the seat-based AI copilot (Arc)
-atlas-dashboard/    Next.js frontend — Smart Canvas (schematic annotation over the
-                    original print), 3D machine graph, Data Map + Proving Bench,
-                    document extraction surfaces
-docs/               The public marketing page (served by GitHub Pages from this repo)
+                    the audit engine, the live canvas bridge, and Arc's seat system
+atlas-dashboard/    Next.js frontend — Smart Canvas, 3D machine graph, Data Map +
+                    Proving Bench, document extraction surfaces
+docs/               The public page (served by GitHub Pages from this repo)
+ARCHITECTURE.md     How the pieces fit — surfaces, seats, bridge, data flow
+TRUST-MODEL.md      Trust tiers, certification lifecycle, and the enforcement points
 ```
 
-## What's deliberately not in here
+The stack: Python/FastAPI, Next.js/React, PostgreSQL, and frontier-model agents (Claude Agent SDK) operating through a typed live bridge — the canvas streams state up and receives commands down, with apply-receipts and idempotency keys so an AI's edit either verifiably landed or verifiably didn't. The pen is a first-class input: what the human is touching *right now* is queryable agent state, not a screenshot guess.
+
+## What's deliberately not here
 
 - **The proving corpus.** The platform was proven against a real machine's private documentation. That corpus belongs to its owner and never enters a public surface — a rule this project enforces on itself the way it enforces its laws on its AI.
-- **The extraction doctrine.** The platform's AI is educated by hundreds of codified extraction lessons mined from real supervised sessions — how to read ditto marks, fold continuation rows, treat blank cells, survive mistranslated bilingual headers. That education is the product's accumulated judgment and ships with the product, not the source. What you're reviewing here is the machinery; the judgment stays home.
-- Credentials, run logs, and internal working notes.
+- **The extraction doctrine.** Arc's education — the codified lessons above — is the product's accumulated judgment. It ships with the product, not the source. This repo is the machinery; the judgment stays home.
+- Credentials, run logs, internal working notes.
 
-## Can I run it?
+*(One historical wart, on purpose: the certification store carries the legacy identifier `gold_sealed_annotations`. The trust tier was renamed "Certified," but stored identifiers keep their names — renaming an append-only archive would be exactly the kind of history rewriting this platform exists to refuse.)*
 
-The license below permits local evaluation. Fair warning: v1 of this repo is published for **review** — the backend expects a PostgreSQL instance and environment configuration that isn't packaged yet. A self-contained evaluation build (docker-compose, local Postgres, bring-your-own-PDF) is the next milestone for this repo.
+## Where it's going
 
-## License
+The lifecycle the platform is being built toward: **ingest → interview → seal → ask.** Upload a machine's documents; the system classifies and extracts everything autonomously; the AI walks you through every uncertainty in plain language (*"this document lists and names wires — are these the same wires we see on the schematic?"*); when you're satisfied, the data shape seals; and from then on, the machine answers questions the way a database does — including, eventually, to a technician holding a tablet at the dead panel. Nearer term for this repo: a self-contained evaluation build (docker-compose, local Postgres, bring-your-own PDF).
 
-Source-available under a **Review & Evaluation License** — you may read this code and run it locally to evaluate it. No production use, no derivative works, no use in competing products. See [LICENSE](LICENSE). If you want to *use* the platform: [request early access](https://atlas-platform.cloud/#contact).
+## License · running it · early access
+
+Source-available under a **Review & Evaluation License** ([LICENSE](LICENSE)): read the code, run it locally to evaluate it — no production use, no derivatives, no competing use. Fair warning: v1 is published for review; the backend expects a PostgreSQL instance and environment configuration that isn't packaged yet.
+
+If you run a plant where the answers still live in binders: **[request early access](https://atlas-platform.cloud/#contact)** — and bring the hard questions. That's what it exists to answer.
 
 ---
 
-*Built by a maintenance engineer with 20+ years on the plant floor, for the 2 AM breakdown where the hunt — which breaker, which wire, which page — takes the hour, and the fix takes minutes.*
+*Built for the 2 AM breakdown, where the hunt takes the hour and the fix takes minutes.*
