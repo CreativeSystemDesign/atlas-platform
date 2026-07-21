@@ -4,6 +4,8 @@
 
 **And to be clear about who does the teaching: we do.** This education happened — and continues — at Atlas-Platform, under our own expert, on real industrial documents. **Arc arrives educated.** A customer never runs a training project, labels a dataset, or supervises an apprenticeship; they get the graduate. The education is also provable in a way model training never is: the knowledge files themselves are the audit trail, and every lesson quotes the human ruling that created it.
 
+One distinction before the mechanics, because it's the entire point: **Arc is not a persona.** A system prompt that says "you are an expert electrical engineer" changes how a model *talks*, not what it *knows*. Arc's expertise is acquired: it learned through supervised work, the way apprentices learn, and it retains that learning as files in its memory — knowledge that exists outside the base model, survives every session, accumulates across years, and can be opened and read by a human. A persona is a costume. An education is a curriculum with an audit trail.
+
 This is the platform's deepest differentiator, so it deserves a full accounting.
 
 ## The loop: Teach → Mine → Attack → Certify → Enforce
@@ -54,6 +56,23 @@ Mistakes are ore, not waste. That's the flywheel.
 - **And the curriculum is less than a tenth complete.** The lessons certified so far cover a fraction of the planned training material; the performance above is what a tenth of the education buys.
 
 The lever gets longer with every session — and the expert's role moves up, from laborer to authority.
+
+## The curriculum
+
+What the education covers today, from the working corpus:
+
+- **JIS / JEM electrical drafting** — JIS C 0617 symbol conventions (including the older forms decades-old prints still carry), JEM 1115 device designations (MC, CR, TR, THR, ELB, MCB, SOL, LS, PB, SS, PL…)
+- **The Japanese sequence-diagram format** (developed connection diagrams) — a-contact/b-contact notation, line-number grids, page-encoded device numbering, page/line continuation references
+- **Mitsubishi MELSEC-Q PLC programs** — GX-format ladder, device comments, special relays, intelligent-module buffer addressing, network configuration logic
+- **Omron SYSMAC CJ-series PLC programs** — CX-format sections, CIO word.bit addressing, and cross-reference listings tying every input to every rung that reads it
+- **FL-net (OPCN-2) multi-vendor networking** — the open FA standard that bridges PLC brands, including the interface lists that map one vendor's addresses to the other's
+- **IEC 61131-3 ladder** (JIS B 3503) in both vendors' dialects
+- **Bilingual (English/Japanese) industrial documentation** — including the mistranslated-header traps
+- **Vendor compliance ecosystems** — reading UL / CSA / cULus / CE / NK / Lloyd's certification tables off component datasheets
+- **JIS technical-drawing practice** — zone-grid sheets, bilingual title blocks, revision tables, Munsell color notation on panel specifications
+- **The unwritten print grammar no standard documents** — ditto marks, continuation rows, strike-through supersession, revision clouds, route-encoding cable callouts, blank-cell semantics
+
+The curriculum grows the way it always has: a new document family arrives, the expert teaches by working, and the pipeline turns the sessions into certified law.
 
 ## Why publish the method?
 
