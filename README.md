@@ -12,7 +12,7 @@
 
 Atlas-Platform ingests the PDFs behind an industrial machine — schematics, cable lists, terminal-box wiring, parts catalogs, PLC references, error lists — and builds **a digital twin of the documentation, and through it, the machine**: Certified relational data and a queryable graph with provenance down to the exact printed mark, complete enough that the schematic can be redrawn from the data alone.
 
-And when your plant's own records are available — **at your direction** — it can integrate them too: **parts inventory, machine downtime history, manufacturing data.** Joined to the twin, that history goes to work: recurring failures surface as patterns instead of anecdotes, probable root causes come backed by what has actually happened before, repair decisions carry a rationale drawn from data instead of memory — and the spare's shelf location rides along with the answer.
+When your plant's own records are available — **at your direction** — Atlas-Platform can integrate those too: **parts inventory, machine downtime history, manufacturing data.** Joined to the twin, that history goes to work: recurring failures surface as patterns instead of anecdotes, probable root causes come backed by what has actually happened before, repair decisions carry a rationale drawn from data instead of memory — and the spare's shelf location rides along with the answer.
 
 **Live page:** [atlas-platform.cloud](https://atlas-platform.cloud) · **This repo, rendered:** [creativesystemdesign.github.io/atlas-platform](https://creativesystemdesign.github.io/atlas-platform/) · **Status:** pre-launch, working platform, [early access open](https://atlas-platform.cloud/#contact)
 
