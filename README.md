@@ -78,7 +78,7 @@ That collapses the "impossible" problem into a tractable one: **get the schemati
 
 ## The AI works under law
 
-Every AI-extraction product asks you to trust its model. Atlas is built the other way around: the AI operates under laws that hold it to the print — **enforced in code, not policy prose.** That's also why this repo exists: a platform whose premise is auditability should let you audit the software.
+On the market today, every AI-extraction product asks you to trust its model. Atlas is built the other way around: the AI operates under laws that hold it to the print — **enforced in code, not policy prose.** That's also why this repo exists: a platform whose premise is auditability should let you audit the software.
 
 | Law | Where the code enforces it |
 |---|---|
