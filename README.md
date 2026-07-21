@@ -4,7 +4,7 @@
 
 > *"Give me a lever and a fulcrum, and I shall move the world."* — Archimedes
 >
-> **The lever is Arc** — the resident AI industrial engineer, and the reason for the name: educated by human-blessed lessons, it gets longer with every session. Force, multiplied.
+> **The lever is Arc** — the resident AI industrial engineer, and the reason for the name: educated by human-certified lessons, it gets longer with every session. Force, multiplied.
 >
 > **The fulcrum is the platform** — Certified data, provenance to the exact printed mark, laws enforced in code. A fixed point that doesn't slip under load.
 >
@@ -97,14 +97,17 @@ Depth: **[ARCHITECTURE.md](ARCHITECTURE.md)** · **[TRUST-MODEL.md](TRUST-MODEL.
 
 Arc is the AI industrial engineer resident in every surface. Durability is architecture, not policy: every artifact — graphs, seals, tables, lessons — persists to the database of record, so nothing lives in one fragile place.
 
-What makes Arc different isn't capability. It's **education with an audit trail**:
+What makes Arc different isn't capability. It's **education with an audit trail** — a five-stage loop: **Teach → Mine → Attack → Certify → Enforce.**
 
-- **First attempt ever** at annotating a schematic page: three boxes, roughly half right.
-- Every supervised session since is **mined for lessons** — a pipeline that separates the human's actual rulings from machine noise, extracts candidate doctrine, **adversarially attacks each candidate** (a skeptic per lesson, default reject), dedups against existing law, and presents survivors for human blessing. Nothing self-promotes to law.
-- **260+ lessons** have been codified this way — how to read ditto marks, fold continuation rows, treat blank cells as a three-way distinction, survive mistranslated bilingual headers, respect print conventions the drafter assumed everyone knew.
-- Today, Arc annotates **entire schematic pages autonomously**, and recent pages have passed human certification **without a single correction at the seal**.
+- **Teach:** the expert just works — corrections and rulings land in the session stream as ordinary conversation.
+- **Mine:** a deterministic distiller separates the expert's *verbatim words* from machine noise; finder agents extract candidate lessons, each required to carry the human's actual quoted sentence. Paraphrase is rejected outright.
+- **Attack:** an adversarial skeptic tries to refute every candidate — grounding and worthiness, *default reject on doubt*.
+- **Certify:** the pipeline ends at a slate a human walks. Nothing self-promotes to law — the same discipline the platform applies to data, applied to the AI's own mind.
+- **Enforce:** certified lessons are wired into mechanisms, not prose — audit rules born as warnings that earn blocking status only at zero false positives, seat-scoped doctrine that loads exactly where it applies, live next session with zero deploy.
 
-The human's role didn't disappear — it moved up. AI does the labor; the person is the authority. And every audit rule Arc works under was *earned*: rules are born as warnings and promoted to errors only after calibration against human-certified pages with zero false positives.
+The measurable arc: Arc's **first attempt ever** at a schematic page produced three boxes, roughly half right. **260+ certified lessons later**, it annotates entire pages autonomously — and recent pages have passed human certification **without a single correction at the seal**. When it isn't perfect, the rails catch it (audit engine, done-gate, fresh-pixel judging) — and the catch becomes the next lesson. Mistakes are ore, not waste.
+
+**Full treatment: [EDUCATION.md](EDUCATION.md)** — training without training, and why the method is publishable but the education is the moat.
 
 ## The detection stack — geometry, not pixels
 
