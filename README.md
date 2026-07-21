@@ -23,9 +23,9 @@ When your plant's own records are available — **at your direction** — Atlas-
 
 ## The 2 AM problem
 
-This platform was built by a maintenance engineer, not a software company. Twenty-plus years on a plant floor, living by two numbers — **MTTR** and **MTBF** — produced one observation that wouldn't go away:
-
-> When a machine goes down, the physical fix is usually minutes. The **hour** goes to the hunt: *which* breaker, *which* wire number, *which* page of *which* manual, and is there a spare on the shelf. Almost all of diagnosis time is **documentation time**. Fix the documentation problem and you fix the whole metric.
+> *"As an engineer with twenty-plus years on a plant floor, I lived by two numbers — **MTTR** and **MTBF** — and watching them produced one observation that wouldn't go away: when a machine goes down, the physical fix is usually minutes. The **hour** goes to the hunt — which breaker, which wire number, which page of which manual, and is there a spare on the shelf. Almost all of diagnosis time is documentation time. Fix the documentation problem and you fix the whole metric."*
+>
+> — the founder. This platform was built by a maintenance engineer, not a software company.
 
 The knowledge exists — trapped in thousands of pages of scanned schematics, cable lists, terminal-box drawings, and parts catalogs that only the most senior people can navigate. Every retirement takes that navigation skill out the door.
 
