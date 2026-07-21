@@ -1,0 +1,231 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.13 0 0);
+  --foreground: oklch(0.95 0 0);
+  --card: oklch(0.18 0 0);
+  --card-foreground: oklch(0.95 0 0);
+  --popover: oklch(0.18 0 0);
+  --popover-foreground: oklch(0.95 0 0);
+  --primary: oklch(0.70 0.20 250);
+  --primary-foreground: oklch(0.98 0 0);
+  --secondary: oklch(0.22 0 0);
+  --secondary-foreground: oklch(0.90 0 0);
+  --muted: oklch(0.20 0 0);
+  --muted-foreground: oklch(0.65 0 0);
+  --accent: oklch(0.22 0.03 250);
+  --accent-foreground: oklch(0.95 0 0);
+  --destructive: oklch(0.65 0.25 25);
+  --border: oklch(1 0 0 / 15%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.70 0.20 250);
+  --chart-1: oklch(0.70 0.20 250);
+  --chart-2: oklch(0.65 0.22 160);
+  --chart-3: oklch(0.75 0.18 50);
+  --chart-4: oklch(0.60 0.25 310);
+  --chart-5: oklch(0.70 0.18 30);
+  --sidebar: oklch(0.09 0 0);
+  --sidebar-foreground: oklch(0.90 0 0);
+  --sidebar-primary: oklch(0.70 0.20 250);
+  --sidebar-primary-foreground: oklch(0.98 0 0);
+  --sidebar-accent: oklch(0.18 0.02 250);
+  --sidebar-accent-foreground: oklch(0.95 0 0);
+  --sidebar-border: oklch(1 0 0 / 12%);
+  --sidebar-ring: oklch(0.70 0.20 250);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(1 0 0 / 10%);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(1 0 0 / 20%);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(1 0 0 / 10%) transparent;
+  }
+}
+
+@layer components {
+  .atlas-code-shell {
+    background-image:
+      linear-gradient(rgba(103, 232, 249, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(103, 232, 249, 0.028) 1px, transparent 1px);
+    background-size: 64px 64px;
+  }
+
+  .atlas-code-prosemirror.ProseMirror {
+    min-height: 6rem;
+    outline: none;
+  }
+
+  .atlas-code-prosemirror.ProseMirror p.is-editor-empty:first-child::before {
+    color: rgb(148 163 184 / 0.48);
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .atlas-code-prosemirror.ProseMirror p {
+    margin: 0;
+  }
+
+  .atlas-code-prosemirror.ProseMirror p + p {
+    margin-top: 0.5rem;
+  }
+
+  .atlas-code-prosemirror.ProseMirror code {
+    border: 1px solid rgb(103 232 249 / 0.12);
+    border-radius: 0.45rem;
+    background: rgb(103 232 249 / 0.08);
+    padding: 0.1rem 0.35rem;
+    color: rgb(207 250 254 / 0.92);
+    font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.86em;
+  }
+
+  .atlas-code-prosemirror.ProseMirror pre {
+    margin: 0.65rem 0 0;
+    overflow-x: auto;
+    border: 1px solid rgb(255 255 255 / 0.07);
+    border-radius: 1rem;
+    background: rgb(0 0 0 / 0.28);
+    padding: 0.8rem;
+    color: rgb(207 250 254 / 0.82);
+    font-size: 0.78rem;
+    line-height: 1.45;
+  }
+}
+
+/* ── Smart Canvas "Midnight Gallery" ambient keyframes ──────────────────────
+   Used by the header palm-guard chip, the bridge dot, and the ambient layer's
+   CSS-glow fallback. All are decorative + infinite, so they are disabled under
+   prefers-reduced-motion (the pen/keyboard experience is unaffected). */
+@keyframes sc-breath { 0%, 100% { opacity: 1 } 50% { opacity: .55 } }
+@keyframes sc-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,.28) }
+  50% { box-shadow: 0 0 0 7px rgba(34,211,238,0) }
+}
+@keyframes sc-gallery-glow {
+  0%, 100% { opacity: .45; transform: scale(1) }
+  50% { opacity: .9; transform: scale(1.07) }
+}
+@media (prefers-reduced-motion: reduce) {
+  [style*="sc-breath"], [style*="sc-glow"], [style*="sc-gallery-glow"] {
+    animation: none !important;
+  }
+}
+
+/* Schema-Builder selectable text layer: transparent glyphs need a visible
+   selection highlight (the platform cyan). */
+.pdf-text-layer span::selection {
+  background: rgba(34, 211, 238, 0.35);
+  color: transparent;
+}

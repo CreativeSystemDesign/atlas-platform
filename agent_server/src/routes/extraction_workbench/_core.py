@@ -1,0 +1,6451 @@
+"""Extraction Studio development-aid routes.
+
+These routes serve reference assets for the Atlas Extraction Studio. They are
+not production extraction endpoints and do not write digital-twin facts.
+"""
+
+from __future__ import annotations
+
+import csv
+import base64
+import asyncio
+import io
+import json
+import math
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+import uuid
+import zipfile
+import random
+from pathlib import Path
+from typing import Any, Literal
+
+import httpx
+import google.auth
+import google.auth.transport.requests
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, Response
+from PIL import Image
+from pydantic import BaseModel, Field
+
+from src.persistence.database import get_pool
+from src.persistence.projects import DEFAULT_PROJECT_ID, get_project
+
+router = APIRouter(prefix="/workbench", tags=["Extraction Workbench"])
+
+_DEFAULT_DOCUMENT_ID = "schematic_<drawing-no>"
+_REPO_ROOT = Path(__file__).resolve().parents[4]  # src/routes/extraction_workbench/_core.py -> repo root
+_WORKBENCH_ASSET_ROOT = Path(
+    os.getenv(
+        "ATLAS_WORKBENCH_ASSET_ROOT",
+        str(_REPO_ROOT / ".atlas/extraction-workbench/reference-assets/annotator"),
+    )
+)
+_LEGACY_ANNOTATOR_DATA_ROOT = Path("/mnt/c/annotator/data")
+_PAGE_IMAGE_ROOTS = [
+    _WORKBENCH_ASSET_ROOT / "pages",
+    _LEGACY_ANNOTATOR_DATA_ROOT / "pages",
+]
+_METADATA_PATHS = [
+    _WORKBENCH_ASSET_ROOT / "metadata.json",
+    _LEGACY_ANNOTATOR_DATA_ROOT / "metadata.json",
+]
+_SYMBOL_BANK_CSV_PATHS = [
+    _REPO_ROOT / ".atlas/outputs/1650_electrical_parts_list.csv",
+    _REPO_ROOT
+    / ".atlas/agent-workbench/data-extraction-supervisor/outputs/the reference machine/the reference machine/"
+    / "04_ELECTRICAL PARTS LIST_<drawing-no>_extracted.csv",
+    Path("/home/eshan/atlas-platform/.atlas/outputs/1650_electrical_parts_list.csv"),
+    Path(
+        "/home/eshan/atlas-platform/.atlas/agent-workbench/data-extraction-supervisor/"
+        "outputs/the reference machine/the reference machine/04_ELECTRICAL PARTS LIST_<drawing-no>_extracted.csv"
+    ),
+]
+_PAGE_COUNT = 129
+_PAGE_WIDTH_PX = 2481
+_PAGE_HEIGHT_PX = 3509
+_YOLOV26_MIN_TRAINING_OBJECTS_PER_CLASS = 280
+_YOLOV26_SYNTHETIC_VALIDATION_OBJECTS_PER_CLASS = 100
+_QWEN_ROI_SERVER_URL = os.getenv(
+    "ATLAS_QWEN_ROI_SERVER_URL",
+    "http://127.0.0.1:8091/v1/chat/completions",
+)
+_QWEN_ROI_MODEL = os.getenv("ATLAS_QWEN_ROI_MODEL", "qwen3-vl-2b-instruct-gguf")
+_QWEN_ROI_TIMEOUT_SECONDS = float(os.getenv("ATLAS_QWEN_ROI_TIMEOUT_SECONDS", "90"))
+_COLAB_ENTERPRISE_SCRIPT = _REPO_ROOT / "scripts" / "colab_enterprise_qwen3vl.py"
+_COLAB_ENTERPRISE_REGION = os.getenv("ATLAS_COLAB_ENTERPRISE_REGION", "us-central1")
+_COLAB_ENTERPRISE_BUCKET = os.getenv(
+    "ATLAS_COLAB_ENTERPRISE_BUCKET",
+    "gs://gen-lang-client-0746582623-atlas-datasets",
+)
+_COLAB_ENTERPRISE_PREFIX = os.getenv("ATLAS_COLAB_ENTERPRISE_PREFIX", "atlas/qwen3vl")
+_COLAB_ENTERPRISE_AGENT_BASE = os.getenv("ATLAS_COLAB_ENTERPRISE_AGENT_BASE", "")
+_COLAB_ENTERPRISE_TEMPLATE = os.getenv(
+    "ATLAS_COLAB_ENTERPRISE_RUNTIME_TEMPLATE",
+    "atlas-vision-train-a100-80gb",
+)
+_COLAB_ENTERPRISE_SERVICE_ACCOUNT = os.getenv("ATLAS_COLAB_ENTERPRISE_SERVICE_ACCOUNT", "")
+_QWEN3VL_DRIVE_FOLDER = os.getenv("ATLAS_QWEN3VL_DRIVE_FOLDER", "atlas/qwen3vl")
+_GOOGLE_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+_GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+_QWEN3VL_300DPI_PAGE_ROOT = (
+    _REPO_ROOT / "qwen3vl" / "Qwen3-VL" / "01_SCHEMATIC_DIAGRAM_<drawing-no>_300dpi"
+)
+_YOLOV26_WEIGHTS_PATH = Path(
+    os.getenv(
+        "ATLAS_YOLOV26_WEIGHTS",
+        str(_REPO_ROOT / ".tmp" / "yolo_compare_feb" / "best.pt"),
+    )
+)
+_YOLOV26_PYTHON = os.getenv(
+    "ATLAS_YOLOV26_PYTHON",
+    r"C:\annotator\.venv\Scripts\python.exe",
+)
+_YOLOV26_IMG_SIZE = int(os.getenv("ATLAS_YOLOV26_IMGSZ", "1280"))
+_YOLOV26_CONF = float(os.getenv("ATLAS_YOLOV26_CONF", "0.25"))
+_YOLOV26_IOU = float(os.getenv("ATLAS_YOLOV26_IOU", "0.45"))
+AnnotationWorkspaceMode = Literal["digital_twin", "training_dataset", "yolo"]
+_ANNOTATION_TABLES: dict[AnnotationWorkspaceMode, str] = {
+    "digital_twin": "schematic_annotations",
+    "training_dataset": "schematic_training_annotations",
+    "yolo": "yolocolab",
+}
+
+
+def _gcloud_active_account() -> str:
+    gcloud = shutil.which("gcloud.cmd") or shutil.which("gcloud.exe") or shutil.which("gcloud")
+    if not gcloud and os.name == "nt":
+        for root in (os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
+            if not root:
+                continue
+            candidate = (
+                Path(root)
+                / "Google"
+                / "Cloud SDK"
+                / "google-cloud-sdk"
+                / "bin"
+                / "gcloud.cmd"
+            )
+            if candidate.exists():
+                gcloud = str(candidate)
+                break
+    if not gcloud:
+        return ""
+    try:
+        result = subprocess.run(
+            [gcloud, "config", "get", "account"],
+            cwd=str(_REPO_ROOT),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    account = result.stdout.strip()
+    return "" if account == "(unset)" else account
+
+
+_COLAB_ENTERPRISE_USER_EMAIL = os.getenv(
+    "ATLAS_COLAB_ENTERPRISE_USER_EMAIL",
+    "",
+) or _gcloud_active_account()
+
+
+def _colab_enterprise_agent_base() -> str:
+    if _COLAB_ENTERPRISE_AGENT_BASE.strip():
+        return _COLAB_ENTERPRISE_AGENT_BASE.strip().rstrip("/")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            host = sock.getsockname()[0]
+    except OSError:
+        host = "127.0.0.1"
+    return f"http://{host}:8123"
+
+
+def _annotation_table(annotation_mode: AnnotationWorkspaceMode) -> str:
+    return _ANNOTATION_TABLES[annotation_mode]
+
+
+class WorkbenchAnnotation(BaseModel):
+    id: str
+    pageNum: int
+    label: str
+    rootType: str | None = None
+    type: str | None = None
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    bbox: dict[str, float]
+    labelBbox: dict[str, float] | None = None
+    labelSource: str | None = None
+    labelCandidateIndex: int = -1
+    labelCandidates: list[dict[str, Any]] = Field(default_factory=list)
+    source: str = "human"
+    snapped: bool = False
+    createdAt: str | None = None
+    updatedAt: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkbenchAnnotationSave(BaseModel):
+    annotationMode: AnnotationWorkspaceMode | None = None
+    annotations: list[WorkbenchAnnotation] = Field(default_factory=list)
+
+
+class WorkbenchAnnotationSnapshotCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    notes: str | None = None
+    source: str = Field(default="operator", min_length=1, max_length=80)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkbenchRoiBox(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class WorkbenchQwenRoiDetect(BaseModel):
+    annotationMode: AnnotationWorkspaceMode = "training_dataset"
+    roi: WorkbenchRoiBox
+    mode: Literal["component_center_click", "manual_roi"] = "component_center_click"
+
+
+class WorkbenchVisionTrainingLaunch(BaseModel):
+    trainer: str = "qwen3vl"
+    modelId: str = "Qwen/Qwen3-VL-32B-Instruct"
+    datasetKind: str = "schematic_component_grounding"
+    launchMode: Literal["local_preflight", "stage_preflight", "eval_run", "gpu_smoke", "execute"] = "stage_preflight"
+    annotationMode: AnnotationWorkspaceMode = "training_dataset"
+    classes: str = "EARTH_LEAKAGE_BREAKER,MAGNETIC_CONTACTOR,ELB,MC"
+    region: str = _COLAB_ENTERPRISE_REGION
+    gcsBucket: str = _COLAB_ENTERPRISE_BUCKET
+    gcsPrefix: str = _COLAB_ENTERPRISE_PREFIX
+    runtimeTemplate: str = _COLAB_ENTERPRISE_TEMPLATE
+    userEmail: str = _COLAB_ENTERPRISE_USER_EMAIL
+    serviceAccount: str = _COLAB_ENTERPRISE_SERVICE_ACCOUNT
+    executionTimeout: str = "24h"
+
+
+class WorkbenchQwenDriveExport(BaseModel):
+    annotationMode: AnnotationWorkspaceMode = "training_dataset"
+    classes: str = "EARTH_LEAKAGE_BREAKER,MAGNETIC_CONTACTOR,ELB,MC"
+    driveFolder: str = _QWEN3VL_DRIVE_FOLDER
+    exportName: str | None = None
+    modelId: str = "Qwen/Qwen3-VL-32B-Instruct"
+
+
+class WorkbenchYolov26DetectRoi(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class WorkbenchYolov26PageDetect(BaseModel):
+    weightsPath: str | None = None
+    pythonPath: str | None = None
+    imgsz: int = _YOLOV26_IMG_SIZE
+    conf: float = _YOLOV26_CONF
+    iou: float = _YOLOV26_IOU
+    agnosticNms: bool = True
+    roi: WorkbenchYolov26DetectRoi | None = None
+
+
+async def _resolve_project(project_id: uuid.UUID | None = None) -> dict[str, object]:
+    selected = project_id or DEFAULT_PROJECT_ID
+    project = await get_project(selected)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    return project
+
+
+def _project_id(project: dict[str, object]) -> str:
+    return str(project["project_id"])
+
+
+def _document_payload(project: dict[str, object]) -> dict[str, object]:
+    return {
+        "project_id": _project_id(project),
+        "document_id": _DEFAULT_DOCUMENT_ID,
+        "label": "reference schematic",
+        "role": "reference-development-source",
+        "page_count": _PAGE_COUNT,
+        "canonical_width_px": _PAGE_WIDTH_PX,
+        "canonical_height_px": _PAGE_HEIGHT_PX,
+    }
+
+
+def _first_existing_path(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def _workbench_page_image_path(document_id: str, page_num: int) -> Path:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    if page_num < 1 or page_num > _PAGE_COUNT:
+        raise HTTPException(status_code=404, detail="workbench page not found")
+
+    image_path = _first_existing_path(
+        [
+            candidate
+            for root in _PAGE_IMAGE_ROOTS
+            for candidate in (
+                root / f"page-{page_num:03d}.png",
+                root / f"page_{page_num}.png",
+            )
+        ]
+    )
+    if image_path is None:
+        raise HTTPException(status_code=404, detail="workbench page image not found")
+    return image_path
+
+
+def _qwen3vl_sweep_page_image_path(page_num: int) -> Path | None:
+    candidates = [
+        _QWEN3VL_300DPI_PAGE_ROOT / f"page-{page_num:03d}.png",
+        _QWEN3VL_300DPI_PAGE_ROOT / f"page_{page_num}.png",
+        *_PAGE_IMAGE_ROOTS,
+    ]
+    for candidate in candidates:
+        path = candidate if candidate.suffix else candidate / f"page_{page_num}.png"
+        if path.exists():
+            return path
+    return None
+
+
+def _clamp_roi_to_page(roi: WorkbenchRoiBox) -> dict[str, int]:
+    left = max(0, min(_PAGE_WIDTH_PX, int(round(roi.x))))
+    top = max(0, min(_PAGE_HEIGHT_PX, int(round(roi.y))))
+    right = max(0, min(_PAGE_WIDTH_PX, int(round(roi.x + roi.width))))
+    bottom = max(0, min(_PAGE_HEIGHT_PX, int(round(roi.y + roi.height))))
+    if right <= left or bottom <= top:
+        raise HTTPException(status_code=400, detail="roi is outside the page")
+    return {
+        "x": left,
+        "y": top,
+        "width": right - left,
+        "height": bottom - top,
+    }
+
+
+def _extract_json_object(text: str) -> Any:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"(\{.*\}|\[.*\])", cleaned, flags=re.DOTALL)
+    if not match:
+        raise HTTPException(status_code=502, detail="qwen roi response did not include JSON")
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"qwen roi JSON parse failed: {exc}") from exc
+
+
+def _normalize_qwen_detection(payload: Any, roi: dict[str, int]) -> dict[str, Any] | None:
+    item = payload
+    if isinstance(payload, list):
+        item = payload[0] if payload else None
+    if not isinstance(item, dict):
+        return None
+    if item.get("bbox_2d") is None and item.get("bbox") is None:
+        return None
+    if item.get("label") is None and item.get("text") is None and item.get("confidence") is None:
+        return None
+
+    raw_bbox = item.get("bbox_2d") or item.get("bbox")
+    if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
+        raise HTTPException(status_code=502, detail="qwen roi bbox must be [x1, y1, x2, y2]")
+    try:
+        x1, y1, x2, y2 = [float(value) for value in raw_bbox]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="qwen roi bbox contains non-numeric values") from exc
+
+    crop_width = roi["width"]
+    crop_height = roi["height"]
+    left = max(0.0, min(float(crop_width), min(x1, x2)))
+    top = max(0.0, min(float(crop_height), min(y1, y2)))
+    right = max(0.0, min(float(crop_width), max(x1, x2)))
+    bottom = max(0.0, min(float(crop_height), max(y1, y2)))
+    if right - left < 3 or bottom - top < 3:
+        return None
+
+    return {
+        "bbox": {
+            "x": roi["x"] + left,
+            "y": roi["y"] + top,
+            "width": right - left,
+            "height": bottom - top,
+        },
+        "crop_bbox": {
+            "x": left,
+            "y": top,
+            "width": right - left,
+            "height": bottom - top,
+        },
+        "label": item.get("label"),
+        "text": item.get("text"),
+        "confidence": item.get("confidence"),
+    }
+
+
+@router.get("/documents")
+async def list_workbench_documents() -> list[dict[str, object]]:
+    """Return known development documents available to Extraction Studio."""
+    project = {"project_id": str(DEFAULT_PROJECT_ID)}
+    return [_document_payload(project)]
+
+
+@router.get("/projects/{project_id}/documents")
+async def list_project_workbench_documents(project_id: uuid.UUID) -> list[dict[str, object]]:
+    """Return development documents for the selected machine project."""
+    project = await _resolve_project(project_id)
+    return [_document_payload(project)]
+
+
+@router.get("/documents/{document_id}/pages")
+def list_workbench_pages(document_id: str) -> list[dict[str, object]]:
+    """Return canonical page metadata for a development document."""
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    return [
+        {
+            "document_id": document_id,
+            "page_num": page_num,
+            "canonical_width_px": _PAGE_WIDTH_PX,
+            "canonical_height_px": _PAGE_HEIGHT_PX,
+            "image_url": f"/workbench/documents/{document_id}/pages/{page_num}/image",
+        }
+        for page_num in range(1, _PAGE_COUNT + 1)
+    ]
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages")
+async def list_project_workbench_pages(
+    project_id: uuid.UUID,
+    document_id: str,
+) -> list[dict[str, object]]:
+    _ = project_id
+    return list_workbench_pages(document_id)
+
+
+@router.get("/documents/{document_id}/pages/{page_num}/image")
+def get_workbench_page_image(document_id: str, page_num: int) -> FileResponse:
+    """Serve a canonical page render for visual workbench validation."""
+    image_path = _workbench_page_image_path(document_id, page_num)
+    return FileResponse(image_path, media_type="image/png", filename=image_path.name)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages/{page_num}/image")
+async def get_project_workbench_page_image(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+) -> FileResponse:
+    _ = project_id
+    return get_workbench_page_image(document_id, page_num)
+
+
+@router.post("/projects/{project_id}/documents/{document_id}/pages/{page_num}/qwen-roi-detect")
+async def detect_project_workbench_qwen_roi(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    body: WorkbenchQwenRoiDetect,
+) -> dict[str, Any]:
+    """Ask the local Qwen3-VL GGUF runtime for one component bbox inside a page ROI."""
+    await _resolve_project(project_id)
+    if body.annotationMode != "training_dataset":
+        raise HTTPException(status_code=400, detail="qwen roi assist is only available in the training dataset workspace")
+
+    image_path = _workbench_page_image_path(document_id, page_num)
+    roi = _clamp_roi_to_page(body.roi)
+    started = time.perf_counter()
+    with Image.open(image_path) as image:
+        crop = image.convert("RGB").crop(
+            (roi["x"], roi["y"], roi["x"] + roi["width"], roi["y"] + roi["height"])
+        )
+        buffer = io.BytesIO()
+        crop.save(buffer, format="PNG")
+    image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    prompt = (
+        "You are assisting object-detection annotation for an industrial electrical schematic. "
+        "Detect only the single schematic component body centered in this crop. "
+        "Return only JSON with this exact shape: "
+        "{\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"component\",\"text\":\"visible label if readable\",\"confidence\":0.0}. "
+        "Coordinates must be pixel coordinates inside this crop. "
+        "The box must tightly surround the component body, not connected wires, labels, terminals, or nearby text. "
+        "If there is no centered component body, return null."
+    )
+    request_payload = {
+        "model": _QWEN_ROI_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                    },
+                ],
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 160,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=_QWEN_ROI_TIMEOUT_SECONDS) as client:
+            response = await client.post(_QWEN_ROI_SERVER_URL, json=request_payload)
+            response.raise_for_status()
+    except httpx.ConnectError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="local qwen roi server is not running on the configured URL",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"local qwen roi request failed: {exc}") from exc
+
+    payload = response.json()
+    raw_text = (
+        payload.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        raise HTTPException(status_code=502, detail="qwen roi response was empty")
+
+    detection = _normalize_qwen_detection(_extract_json_object(raw_text), roi)
+    elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    return {
+        "source": "local-qwen3-vl-gguf",
+        "mode": body.mode,
+        "roi": roi,
+        "detection": detection,
+        "rawText": raw_text,
+        "elapsedMs": elapsed_ms,
+    }
+
+
+@router.post("/projects/{project_id}/documents/{document_id}/pages/{page_num}/yolov26-detect")
+async def detect_project_workbench_yolov26_page(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    body: WorkbenchYolov26PageDetect | None = None,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _detect_yolov26_page(
+        project,
+        document_id,
+        page_num,
+        body or WorkbenchYolov26PageDetect(),
+    )
+
+
+@router.get("/documents/{document_id}/pages/{page_num}/metadata")
+async def get_workbench_page_metadata(document_id: str, page_num: int) -> dict[str, object]:
+    """Serve page metadata needed for development-time snapping and validation."""
+    project = await _resolve_project()
+    return await _get_workbench_page_metadata(project, document_id, page_num)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages/{page_num}/metadata")
+async def get_project_workbench_page_metadata(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _get_workbench_page_metadata(project, document_id, page_num)
+
+
+@router.get("/documents/{document_id}/sheets")
+async def list_workbench_sheet_index(document_id: str) -> dict[str, object]:
+    """The whole canonical sheet index for a document (feeds ⌘K jump-by-title)."""
+    project = await _resolve_project()
+    return {"documentId": document_id, "sheets": await _list_sheet_index(project, document_id)}
+
+
+@router.get("/documents/{document_id}/pages/{page_num}/sheet")
+async def get_workbench_sheet(document_id: str, page_num: int) -> dict[str, object]:
+    """Canonical per-page record — title (en/ja), sheet ref, drawing number,
+    geometry. The single door for a page's identity."""
+    project = await _resolve_project()
+    return await _get_sheet_index(project, document_id, page_num)
+
+
+@router.get("/documents/{document_id}/pages/{page_num}/annotations")
+async def get_workbench_page_annotations(
+    document_id: str,
+    page_num: int,
+    annotationMode: AnnotationWorkspaceMode = Query("digital_twin"),
+) -> dict[str, object]:
+    project = await _resolve_project()
+    return await _get_page_annotations(project, document_id, page_num, annotationMode)
+
+
+@router.put("/documents/{document_id}/pages/{page_num}/annotations")
+async def save_workbench_page_annotations(
+    document_id: str,
+    page_num: int,
+    body: WorkbenchAnnotationSave,
+    annotationMode: AnnotationWorkspaceMode = Query("digital_twin"),
+) -> dict[str, object]:
+    project = await _resolve_project()
+    return await _save_page_annotations(
+        project,
+        document_id,
+        page_num,
+        body.annotationMode or annotationMode,
+        body.annotations,
+    )
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages/{page_num}/annotations")
+async def get_project_workbench_page_annotations(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    annotationMode: AnnotationWorkspaceMode = Query("digital_twin"),
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _get_page_annotations(project, document_id, page_num, annotationMode)
+
+
+@router.put("/projects/{project_id}/documents/{document_id}/pages/{page_num}/annotations")
+async def save_project_workbench_page_annotations(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    body: WorkbenchAnnotationSave,
+    annotationMode: AnnotationWorkspaceMode = Query("digital_twin"),
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _save_page_annotations(
+        project,
+        document_id,
+        page_num,
+        body.annotationMode or annotationMode,
+        body.annotations,
+    )
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages/{page_num}/annotation-snapshots")
+async def list_project_workbench_page_annotation_snapshots(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _list_page_annotation_snapshots(project, document_id, page_num)
+
+
+@router.post("/projects/{project_id}/documents/{document_id}/pages/{page_num}/annotation-snapshots")
+async def create_project_workbench_page_annotation_snapshot(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    body: WorkbenchAnnotationSnapshotCreate,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _create_page_annotation_snapshot(project, document_id, page_num, body)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages/{page_num}/annotation-snapshots/{snapshot_id}")
+async def get_project_workbench_page_annotation_snapshot(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    snapshot_id: uuid.UUID,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _get_page_annotation_snapshot(
+        project, document_id, page_num, snapshot_id
+    )
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/pages/{page_num}/truth")
+async def export_project_workbench_page_truth(
+    project_id: uuid.UUID,
+    document_id: str,
+    page_num: int,
+    annotationMode: AnnotationWorkspaceMode = Query("digital_twin"),
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    payload = await _get_page_annotations(project, document_id, page_num, annotationMode)
+    payload["contract"] = {
+        "kind": "schematic_page_ground_truth_v1",
+        "role": "validation_target",
+        "objects": ["components", "component_marks", "component_label_pairs"],
+        "future_objects": [
+            "wires",
+            "wire_labels",
+            "terminals",
+            "junctions",
+            "continuation_refs",
+            "relationships",
+        ],
+    }
+    return payload
+
+
+@router.get("/documents/{document_id}/symbol-bank")
+async def get_workbench_symbol_bank(document_id: str) -> dict[str, object]:
+    project = await _resolve_project()
+    return await _get_workbench_symbol_bank(project, document_id)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/symbol-bank")
+async def get_project_workbench_symbol_bank(
+    project_id: uuid.UUID,
+    document_id: str,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _get_workbench_symbol_bank(project, document_id)
+
+
+@router.get("/documents/{document_id}/wire-label-bank")
+async def get_workbench_wire_label_bank(document_id: str) -> dict[str, object]:
+    project = await _resolve_project()
+    return await _get_workbench_wire_label_bank(project, document_id)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/wire-label-bank")
+async def get_project_workbench_wire_label_bank(
+    project_id: uuid.UUID,
+    document_id: str,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _get_workbench_wire_label_bank(project, document_id)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/class-tracker")
+async def get_project_workbench_class_tracker(
+    project_id: uuid.UUID,
+    document_id: str,
+    annotationMode: AnnotationWorkspaceMode = Query("digital_twin"),
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _get_workbench_class_tracker(project, document_id, annotationMode)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/vision-training/colab-enterprise")
+async def get_project_vision_training_colab_enterprise_config(
+    project_id: uuid.UUID,
+    document_id: str,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    _validate_workbench_page(document_id, 1)
+    runs = await _list_vision_training_runs(project, document_id)
+    runtime_templates = await _colab_enterprise_runtime_templates()
+    preferred_runtime_template = (
+        _best_colab_runtime_template_id(runtime_templates)
+        or _COLAB_ENTERPRISE_TEMPLATE
+    )
+    return {
+        "enabled": _COLAB_ENTERPRISE_SCRIPT.exists(),
+        "script": str(_COLAB_ENTERPRISE_SCRIPT),
+        "runtimeTemplates": runtime_templates,
+        "budget": {
+            "gpuHoursRemaining": None,
+            "estimatedCostUsd": None,
+            "source": "colab_enterprise_api_unavailable",
+            "note": "Colab Enterprise runtime-template API returns machine and accelerator specs, but not personal Colab compute-unit balance or run cost.",
+        },
+        "defaults": {
+            "region": _COLAB_ENTERPRISE_REGION,
+            "gcsBucket": _COLAB_ENTERPRISE_BUCKET,
+            "gcsPrefix": _COLAB_ENTERPRISE_PREFIX,
+            "runtimeTemplate": preferred_runtime_template,
+            "userEmail": _COLAB_ENTERPRISE_USER_EMAIL,
+            "serviceAccount": _COLAB_ENTERPRISE_SERVICE_ACCOUNT,
+            "trainer": "qwen3vl",
+            "modelId": "Qwen/Qwen3-VL-32B-Instruct",
+            "datasetKind": "schematic_component_grounding",
+            "launchMode": "stage_preflight",
+            "classes": "EARTH_LEAKAGE_BREAKER,MAGNETIC_CONTACTOR,ELB,MC",
+            "executionTimeout": "24h",
+        },
+        "recentRuns": runs[:5],
+    }
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/vision-training/colab-enterprise/runs")
+async def list_project_vision_training_colab_enterprise_runs(
+    project_id: uuid.UUID,
+    document_id: str,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return {"runs": await _list_vision_training_runs(project, document_id)}
+
+
+@router.post("/projects/{project_id}/documents/{document_id}/vision-training/colab-enterprise/runs")
+async def launch_project_vision_training_colab_enterprise_run(
+    project_id: uuid.UUID,
+    document_id: str,
+    body: WorkbenchVisionTrainingLaunch,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _launch_vision_training_colab_enterprise_run(project, document_id, body)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/vision-training/colab-enterprise/runs/{training_run_id}")
+async def get_project_vision_training_colab_enterprise_run(
+    project_id: uuid.UUID,
+    document_id: str,
+    training_run_id: uuid.UUID,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    run = await _get_vision_training_run(project, document_id, training_run_id)
+    if run.get("execution_name"):
+        run = await _refresh_vision_training_run_status(project, document_id, run)
+    return run
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/exports/qwen3vl-colab-dataset.zip")
+async def export_project_qwen3vl_colab_dataset(
+    project_id: uuid.UUID,
+    document_id: str,
+    annotationMode: AnnotationWorkspaceMode = Query("training_dataset"),
+    classes: str | None = Query(
+        "EARTH_LEAKAGE_BREAKER,MAGNETIC_CONTACTOR,ELB,MC"
+    ),
+) -> Response:
+    project = await _resolve_project(project_id)
+    return await _export_qwen3vl_colab_dataset(
+        project,
+        document_id,
+        annotationMode,
+        classes,
+    )
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/exports/yolov26.zip")
+async def export_project_yolov26_dataset(
+    project_id: uuid.UUID,
+    document_id: str,
+    annotationMode: AnnotationWorkspaceMode = Query("training_dataset"),
+) -> Response:
+    project = await _resolve_project(project_id)
+    return await _export_yolov26_dataset(project, document_id, annotationMode)
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/exports/qwen3vl-colab-starter.ipynb")
+async def export_project_qwen3vl_colab_notebook(
+    project_id: uuid.UUID,
+    document_id: str,
+    driveFolder: str = Query(_QWEN3VL_DRIVE_FOLDER),
+    exportName: str | None = Query(None),
+    modelId: str = Query("Qwen/Qwen3-VL-32B-Instruct"),
+) -> Response:
+    project = await _resolve_project(project_id)
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    export_slug = _qwen_drive_export_name(exportName)
+    notebook = _qwen_colab_pro_plus_notebook(
+        drive_folder=driveFolder,
+        export_name=export_slug,
+        model_id=modelId,
+    ).encode("utf-8")
+    return Response(
+        content=notebook,
+        media_type="application/x-ipynb+json",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="qwen3vl_colab_pro_plus_starter.ipynb"'
+            ),
+            "Content-Length": str(len(notebook)),
+        },
+    )
+
+
+@router.post("/projects/{project_id}/documents/{document_id}/exports/qwen3vl-colab-drive")
+async def export_project_qwen3vl_colab_drive(
+    project_id: uuid.UUID,
+    document_id: str,
+    body: WorkbenchQwenDriveExport,
+) -> dict[str, object]:
+    project = await _resolve_project(project_id)
+    return await _export_qwen3vl_colab_drive(project, document_id, body)
+
+
+async def _get_page_annotations(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+    annotation_mode: AnnotationWorkspaceMode = "digital_twin",
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    annotation_table = _annotation_table(annotation_mode)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            f"""
+            SELECT
+                client_annotation_id,
+                page_num,
+                label,
+                annotation_type,
+                bbox,
+                label_bbox,
+                label_source,
+                label_candidate_index,
+                label_candidates,
+                source,
+                snapped,
+                metadata,
+                created_at,
+                updated_at
+            FROM {annotation_table}
+            WHERE project_id = %s
+              AND document_id = %s
+              AND page_num = %s
+            ORDER BY created_at ASC, client_annotation_id ASC
+            """,
+            (uuid.UUID(_project_id(project)), document_id, page_num),
+        )
+        results = await rows.fetchall()
+    symbol_entries = (await _get_workbench_symbol_bank(project, document_id)).get(
+        "symbols", []
+    )
+    return {
+        "project_id": _project_id(project),
+        "document_id": document_id,
+        "page_num": page_num,
+        "annotationMode": annotation_mode,
+        "annotations": [_annotation_row(row, symbol_entries) for row in results],
+    }
+
+
+async def _get_workbench_class_tracker(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+) -> dict[str, object]:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    annotation_table = _annotation_table(annotation_mode)
+
+    if annotation_mode == "yolo":
+        annotations = await _load_yolo_component_annotations(
+            project,
+            document_id,
+            annotation_mode,
+        )
+        counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        for annotation in annotations:
+            export_row = _yolov26_export_row_from_annotation(annotation)
+            class_name = _yolov26_record_class_name(export_row)
+            counts[class_name] = counts.get(class_name, 0) + 1
+            source = str(annotation.get("source") or "unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+
+        classes = [
+            {
+                "className": class_name,
+                "mark": class_name,
+                "rootType": "yolo",
+                "count": count,
+                "source": "yolocolab",
+            }
+            for class_name, count in sorted(counts.items())
+        ]
+        return {
+            "source": f"{annotation_mode}:{annotation_table}",
+            "total": sum(counts.values()),
+            "classes": classes,
+            "source_counts": source_counts,
+        }
+
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            f"""
+            SELECT label, annotation_type, label_bbox, metadata
+            FROM {annotation_table}
+            WHERE project_id = %s
+              AND document_id = %s
+            """,
+            (uuid.UUID(_project_id(project)), document_id),
+        )
+        results = await rows.fetchall()
+
+    counts: dict[tuple[str, str], int] = {}
+
+    def increment(class_name: str, root_type: str) -> None:
+        key = (class_name, root_type)
+        counts[key] = counts.get(key, 0) + 1
+
+    for label, annotation_type, label_bbox, metadata in results:
+        root_type = (metadata or {}).get("rootType") or annotation_type or "component"
+        if root_type == "component":
+            component_class = _dataset_component_class_name(str(label or ""))
+            increment(component_class, root_type)
+            if label_bbox:
+                increment(f"{component_class}_label", root_type)
+        else:
+            increment(_dataset_root_class_name(str(root_type), str(label or "")), str(root_type))
+
+        attachments = (metadata or {}).get("attachments") or []
+        if isinstance(attachments, list):
+            for attachment in attachments:
+                if not isinstance(attachment, dict):
+                    continue
+                attachment_type = str(attachment.get("type") or "")
+                attachment_text = str(attachment.get("text") or "")
+                increment(
+                    _dataset_attachment_class_name(
+                        attachment_type,
+                        attachment_text,
+                        str(label or ""),
+                    ),
+                    attachment_type,
+                )
+
+    classes = [
+        {
+            "className": class_name,
+            "mark": class_name,
+            "rootType": root_type,
+            "count": count,
+        }
+        for (class_name, root_type), count in sorted(counts.items())
+    ]
+    return {
+        "source": f"{annotation_mode}:{annotation_table}",
+        "total": sum(counts.values()),
+        "classes": classes,
+    }
+
+
+async def _export_yolov26_dataset(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+) -> Response:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    if annotation_mode not in {"training_dataset", "yolo"}:
+        raise HTTPException(
+            status_code=400,
+            detail="YOLOv26 export requires annotationMode=training_dataset or yolo",
+        )
+
+    if annotation_mode == "yolo":
+        rows = [
+            _yolov26_export_row_from_annotation(annotation)
+            for annotation in await _load_yolo_component_annotations(
+                project,
+                document_id,
+                annotation_mode,
+            )
+        ]
+    else:
+        rows = await _load_component_dataset_rows(project, document_id, annotation_mode)
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no {annotation_mode} component annotations found",
+        )
+
+    records = [(row, _qwen_component_record(row)) for row in rows]
+    _canonicalize_training_record_classes([record for _, record in records])
+    class_names = _yolov26_class_names(records)
+    class_ids = {name: index for index, name in enumerate(class_names)}
+
+    annotations_by_page: dict[int, list[tuple[dict[str, object], dict[str, object]]]] = {}
+    for row, record in records:
+        page_num = int(row["page_num"])
+        annotations_by_page.setdefault(page_num, []).append((row, record))
+
+    page_nums = sorted(annotations_by_page)
+    val_pages = _yolov26_validation_pages(page_nums, annotations_by_page)
+
+    manifest_annotations: list[dict[str, object]] = []
+    manifest_pages: list[dict[str, object]] = []
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for page_num in page_nums:
+            split = "val" if page_num in val_pages else "train"
+            image_path = _workbench_page_image_path(document_id, page_num)
+            image_stem = f"{document_id}-page-{page_num:03d}"
+            image_name = f"images/{split}/{image_stem}.png"
+            label_name = f"labels/{split}/{image_stem}.txt"
+
+            archive.write(image_path, image_name, compress_type=zipfile.ZIP_STORED)
+            label_lines: list[str] = []
+            for annotation, record in annotations_by_page[page_num]:
+                class_name = _yolov26_record_class_name(annotation)
+                class_id = class_ids[class_name]
+                yolo_box = _yolo_bbox_from_annotation(annotation)
+                label_lines.append(
+                    f"{class_id} "
+                    + " ".join(
+                        f"{value:.6f}"
+                        for value in (
+                            yolo_box["x_center"],
+                            yolo_box["y_center"],
+                            yolo_box["width"],
+                            yolo_box["height"],
+                        )
+                    )
+                )
+                manifest_annotations.append(
+                    {
+                        "id": annotation["id"],
+                        "page": page_num,
+                        "split": split,
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "bbox_px": annotation["bbox"],
+                        "bbox_yolo": yolo_box,
+                        "snapped": annotation.get("snapped"),
+                        "label_candidates": annotation.get("label_candidates"),
+                        "label_candidate_index": annotation.get("label_candidate_index"),
+                        "component_identity": (
+                            annotation["metadata"].get("componentIdentity")
+                            if isinstance(annotation["metadata"], dict)
+                            else None
+                        ),
+                        "yolo_authoring": (
+                            annotation["metadata"].get("yolo")
+                            if isinstance(annotation["metadata"], dict)
+                            else None
+                        ),
+                        "component_symbol": record.get("component_symbol"),
+                        "component_description": record.get("component_description"),
+                        "component_part_number": record.get("component_part_number"),
+                        "component_context_text": record.get("component_context_text"),
+                        "component_location": record.get("component_location"),
+                    }
+                )
+
+            archive.writestr(label_name, "\n".join(label_lines) + "\n")
+            manifest_pages.append(
+                {
+                    "page": page_num,
+                    "split": split,
+                    "image": image_name,
+                    "labels": label_name,
+                    "annotation_count": len(label_lines),
+                }
+            )
+
+        (
+            synthetic_pages,
+            synthetic_background_pages,
+            synthetic_validation_pages,
+            balanced_synthetic_pages,
+        ) = _write_yolov26_crops_and_synthetic_pages(
+            archive,
+            document_id=document_id,
+            annotations_by_page=annotations_by_page,
+            val_pages=val_pages,
+            class_ids=class_ids,
+        )
+
+        data_yaml = _yolov26_data_yaml(
+            has_val=bool(val_pages),
+            class_names=class_names,
+        ).encode("utf-8")
+        manifest = {
+            "dataset": "atlas_yolov26_component_class_detection_v2",
+            "document_id": document_id,
+            "annotation_mode": annotation_mode,
+            "image_size": [_PAGE_WIDTH_PX, _PAGE_HEIGHT_PX],
+            "classes": [
+                {"id": index, "name": name} for index, name in enumerate(class_names)
+            ],
+            "class_policy": (
+                "YOLO class ids are resolved component families such as ELB, MC, WHM, "
+                "INV, and MCB. Parts-list description, part number, selected symbol, "
+                "and context text are retained in manifest metadata."
+            ),
+            "pages": manifest_pages,
+            "synthetic_pages": synthetic_pages,
+            "synthetic_background_pages": synthetic_background_pages,
+            "synthetic_validation_pages": synthetic_validation_pages,
+            "balanced_synthetic_pages": balanced_synthetic_pages,
+            "annotation_count": len(manifest_annotations),
+            "yolo_object_count": (
+                len(manifest_annotations)
+                + sum(int(page["annotation_count"]) for page in synthetic_pages)
+                + sum(
+                    int(page["annotation_count"])
+                    for page in synthetic_background_pages
+                )
+                + sum(
+                    int(page["annotation_count"])
+                    for page in synthetic_validation_pages
+                )
+                + sum(
+                    int(page["annotation_count"])
+                    for page in balanced_synthetic_pages
+                )
+            ),
+            "augmentation_policy": {
+                "minimum_training_objects_per_class": (
+                    _YOLOV26_MIN_TRAINING_OBJECTS_PER_CLASS
+                ),
+                "balanced_synthetic_source": (
+                    "additional clean synthetic sheets created only for classes "
+                    "below the minimum after real pages, clean crop sheets, and "
+                    "schematic-background sheets"
+                ),
+                "synthetic_validation_source": (
+                    "class-coverage validation sheets are generated from saved source "
+                    "annotation crops so every class has validation examples. This is "
+                    "a synthetic coverage signal, not a strict real-world holdout."
+                ),
+            },
+            "annotations": manifest_annotations,
+        }
+        archive.writestr("data.yaml", data_yaml)
+        archive.writestr(
+            "manifest.json",
+            json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8"),
+        )
+        archive.writestr("README.md", _yolov26_readme().encode("utf-8"))
+
+    content = buffer.getvalue()
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="atlas-yolov26-dataset.zip"',
+            "Content-Length": str(len(content)),
+        },
+    )
+
+
+def _yolov26_export_row_from_annotation(
+    annotation: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "id": annotation["id"],
+        "page_num": annotation["pageNum"],
+        "label": annotation["label"],
+        "bbox": annotation["bbox"],
+        "label_bbox": annotation.get("labelBbox"),
+        "label_candidate_index": annotation.get("labelCandidateIndex"),
+        "label_candidates": annotation.get("labelCandidates") or [],
+        "source": annotation.get("source"),
+        "snapped": annotation.get("snapped"),
+        "metadata": annotation.get("metadata") or {},
+    }
+
+
+async def _load_yolo_component_annotations(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+) -> list[dict[str, object]]:
+    annotation_table = _annotation_table(annotation_mode)
+    symbol_entries = (await _get_workbench_symbol_bank(project, document_id)).get(
+        "symbols",
+        [],
+    )
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            f"""
+            SELECT
+                client_annotation_id,
+                page_num,
+                label,
+                annotation_type,
+                bbox,
+                label_bbox,
+                label_source,
+                label_candidate_index,
+                label_candidates,
+                source,
+                snapped,
+                metadata,
+                created_at,
+                updated_at
+            FROM {annotation_table}
+            WHERE project_id = %s
+              AND document_id = %s
+              AND COALESCE(metadata->>'rootType', annotation_type) IN ('component', 'continuation')
+            ORDER BY page_num ASC, created_at ASC, client_annotation_id ASC
+            """,
+            (uuid.UUID(_project_id(project)), document_id),
+        )
+        results = await rows.fetchall()
+    return [_annotation_row(row, symbol_entries) for row in results]
+
+
+def _yolo_bbox_from_annotation(annotation: dict[str, object]) -> dict[str, float]:
+    annotation_id = str(annotation.get("id") or "")
+    bbox = annotation.get("bbox")
+    if not isinstance(bbox, dict):
+        raise HTTPException(
+            status_code=500,
+            detail=f"YOLO annotation {annotation_id} has no bbox object",
+        )
+    try:
+        x = float(bbox["x"])
+        y = float(bbox["y"])
+        width = float(bbox["width"])
+        height = float(bbox["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"YOLO annotation {annotation_id} has an invalid bbox",
+        ) from exc
+    if width <= 0 or height <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"YOLO annotation {annotation_id} has a non-positive bbox size",
+        )
+    if x < 0 or y < 0 or x + width > _PAGE_WIDTH_PX or y + height > _PAGE_HEIGHT_PX:
+        raise HTTPException(
+            status_code=500,
+            detail=f"YOLO annotation {annotation_id} bbox is outside the canonical page",
+        )
+    return {
+        "x_center": (x + width / 2) / _PAGE_WIDTH_PX,
+        "y_center": (y + height / 2) / _PAGE_HEIGHT_PX,
+        "width": width / _PAGE_WIDTH_PX,
+        "height": height / _PAGE_HEIGHT_PX,
+    }
+
+
+def _yolov26_class_names(
+    records: list[tuple[dict[str, object], dict[str, object]]],
+) -> list[str]:
+    class_names = sorted({_yolov26_record_class_name(annotation) for annotation, _ in records})
+    if not class_names:
+        raise HTTPException(status_code=500, detail="YOLO export resolved no classes")
+    return class_names
+
+
+def _yolov26_validation_pages(
+    page_nums: list[int],
+    annotations_by_page: dict[int, list[tuple[dict[str, object], dict[str, object]]]],
+) -> set[int]:
+    if len(page_nums) < 5:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "YOLO export requires at least 5 annotated pages for a real "
+                f"page-level validation split; found {len(page_nums)}"
+            ),
+        )
+    val_count = max(2, math.ceil(len(page_nums) * 0.25))
+    val_count = min(val_count, len(page_nums) - 1)
+    val_pages = set(page_nums[-val_count:])
+    val_records = [
+        annotation
+        for page_num in sorted(val_pages)
+        for annotation, _ in annotations_by_page.get(page_num, [])
+    ]
+    val_classes = {_yolov26_record_class_name(annotation) for annotation in val_records}
+    if len(val_records) < 25:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "YOLO export validation split is too small for a useful signal; "
+                f"pages={sorted(val_pages)} objects={len(val_records)} minimum=25"
+            ),
+        )
+    if len(val_classes) < 5:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "YOLO export validation split has too few classes for this "
+                f"multi-class run; pages={sorted(val_pages)} "
+                f"classes={sorted(val_classes)} minimum=5"
+            ),
+        )
+    return val_pages
+
+
+def _yolov26_record_class_name(annotation: dict[str, object]) -> str:
+    raw_label = str(annotation.get("label") or "")
+    class_name = _normalize_dataset_class_name(raw_label)
+    if not class_name or class_name in {"UNKNOWN_COMPONENT", "COMPONENT"}:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "YOLO export requires every bbox to have a saved non-generic label; "
+                f"failed annotation {annotation.get('id')} on page {annotation.get('pageNum')}"
+            ),
+        )
+    return class_name
+
+
+def _write_yolov26_crops_and_synthetic_pages(
+    archive: zipfile.ZipFile,
+    *,
+    document_id: str,
+    annotations_by_page: dict[int, list[tuple[dict[str, object], dict[str, object]]]],
+    val_pages: set[int],
+    class_ids: dict[str, int],
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+]:
+    rng = random.Random(15188102020)
+    synthetic_pages: list[dict[str, object]] = []
+    synthetic_background_pages: list[dict[str, object]] = []
+    synthetic_validation_pages: list[dict[str, object]] = []
+    balanced_synthetic_pages: list[dict[str, object]] = []
+    crop_bank: dict[str, list[dict[str, object]]] = {class_name: [] for class_name in class_ids}
+    for page_num in sorted(annotations_by_page):
+        image_path = _workbench_page_image_path(document_id, page_num)
+        with Image.open(image_path).convert("RGB") as source_image:
+            page_records = list(annotations_by_page[page_num])
+            rng.shuffle(page_records)
+            clean_sheets: list[dict[str, object]] = []
+            base_background_label_lines: list[str] = []
+            base_background_annotations: list[dict[str, object]] = []
+            base_background_placements: list[tuple[int, int, int, int]] = []
+            for annotation, record in annotations_by_page[page_num]:
+                class_name = _yolov26_record_class_name(annotation)
+                class_id = class_ids[class_name]
+                yolo_box = _yolo_bbox_from_annotation(annotation)
+                base_background_label_lines.append(
+                    f"{class_id} "
+                    + " ".join(
+                        f"{value:.6f}"
+                        for value in (
+                            yolo_box["x_center"],
+                            yolo_box["y_center"],
+                            yolo_box["width"],
+                            yolo_box["height"],
+                        )
+                    )
+                )
+                base_background_annotations.append(
+                    {
+                        "source_annotation_id": annotation.get("id"),
+                        "source_page": page_num,
+                        "source": "original_page_annotation",
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "bbox_px": annotation.get("bbox"),
+                        "bbox_yolo": yolo_box,
+                    }
+                )
+                base_background_placements.append(tuple(_bbox_array(annotation.get("bbox"))))
+
+            background_sheets: list[dict[str, object]] = []
+            for index, (annotation, record) in enumerate(page_records, start=1):
+                x1, y1, x2, y2 = _bbox_array(annotation.get("bbox"))
+                if x2 <= x1 or y2 <= y1:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"YOLO annotation {annotation.get('id')} has an invalid crop bbox",
+                    )
+                crop = source_image.crop((x1, y1, x2, y2))
+                class_name = _yolov26_record_class_name(annotation)
+                crop_name = (
+                    f"crops/{class_name}/page_{page_num:03d}_"
+                    f"{_safe_archive_stem(str(annotation.get('id') or index))}.png"
+                )
+                archive.writestr(crop_name, _png_bytes(crop))
+                crop_bank[class_name].append(
+                    {
+                        "image": crop.copy(),
+                        "crop": crop_name,
+                        "source_annotation_id": annotation.get("id"),
+                        "source_page": page_num,
+                        "class_id": class_ids[class_name],
+                        "class_name": class_name,
+                    }
+                )
+
+                clean_sheet = _clean_sheet_for_crop(
+                    clean_sheets,
+                    rng=rng,
+                    page_num=page_num,
+                    crop_width=crop.width,
+                    crop_height=crop.height,
+                    annotation_id=str(annotation.get("id") or ""),
+                )
+                paste_x, paste_y = clean_sheet["position"]
+                synthetic_image = clean_sheet["image"]
+                label_lines = clean_sheet["label_lines"]
+                placements = clean_sheet["placements"]
+                synthetic_annotations = clean_sheet["annotations"]
+                synthetic_image.paste(crop, (paste_x, paste_y))
+                synthetic_box = {
+                    "x": paste_x,
+                    "y": paste_y,
+                    "width": crop.width,
+                    "height": crop.height,
+                }
+                synthetic_yolo = _yolo_bbox_from_annotation(
+                    {"id": annotation.get("id"), "bbox": synthetic_box}
+                )
+                class_id = class_ids[class_name]
+                label_lines.append(
+                    f"{class_id} "
+                    + " ".join(
+                        f"{value:.6f}"
+                        for value in (
+                            synthetic_yolo["x_center"],
+                            synthetic_yolo["y_center"],
+                            synthetic_yolo["width"],
+                            synthetic_yolo["height"],
+                        )
+                    )
+                )
+                placements.append(
+                    (
+                        paste_x,
+                        paste_y,
+                        paste_x + crop.width,
+                        paste_y + crop.height,
+                    )
+                )
+                synthetic_annotations.append(
+                    {
+                        "source_annotation_id": annotation.get("id"),
+                        "source_page": page_num,
+                        "crop": crop_name,
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "bbox_px": synthetic_box,
+                        "bbox_yolo": synthetic_yolo,
+                    }
+                )
+
+                background_sheet = _background_sheet_for_crop(
+                    background_sheets,
+                    rng=rng,
+                    source_image=source_image,
+                    base_label_lines=base_background_label_lines,
+                    base_annotations=base_background_annotations,
+                    base_placements=base_background_placements,
+                    page_num=page_num,
+                    crop_width=crop.width,
+                    crop_height=crop.height,
+                    annotation_id=str(annotation.get("id") or ""),
+                )
+                background_paste_x, background_paste_y = background_sheet["position"]
+                background_image = background_sheet["image"]
+                background_label_lines = background_sheet["label_lines"]
+                background_placements = background_sheet["placements"]
+                synthetic_background_annotations = background_sheet["annotations"]
+                background_image.paste(
+                    crop,
+                    (background_paste_x, background_paste_y),
+                )
+                background_synthetic_box = {
+                    "x": background_paste_x,
+                    "y": background_paste_y,
+                    "width": crop.width,
+                    "height": crop.height,
+                }
+                background_synthetic_yolo = _yolo_bbox_from_annotation(
+                    {"id": annotation.get("id"), "bbox": background_synthetic_box}
+                )
+                background_label_lines.append(
+                    f"{class_id} "
+                    + " ".join(
+                        f"{value:.6f}"
+                        for value in (
+                            background_synthetic_yolo["x_center"],
+                            background_synthetic_yolo["y_center"],
+                            background_synthetic_yolo["width"],
+                            background_synthetic_yolo["height"],
+                        )
+                    )
+                )
+                background_placements.append(
+                    (
+                        background_paste_x,
+                        background_paste_y,
+                        background_paste_x + crop.width,
+                        background_paste_y + crop.height,
+                    )
+                )
+                synthetic_background_annotations.append(
+                    {
+                        "source_annotation_id": annotation.get("id"),
+                        "source_page": page_num,
+                        "source": "pasted_crop_on_original_schematic_page",
+                        "crop": crop_name,
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "bbox_px": background_synthetic_box,
+                        "bbox_yolo": background_synthetic_yolo,
+                    }
+                )
+
+            for sheet in clean_sheets:
+                sheet_index = int(sheet["sheet_index"])
+                image_name = f"images/train/synthetic_page_{page_num:03d}_{sheet_index:02d}.png"
+                label_name = f"labels/train/synthetic_page_{page_num:03d}_{sheet_index:02d}.txt"
+                archive.writestr(image_name, _png_bytes(sheet["image"]))
+                archive.writestr(label_name, "\n".join(sheet["label_lines"]) + "\n")
+                synthetic_pages.append(
+                    {
+                        "page": page_num,
+                        "sheet_index": sheet_index,
+                        "split": "train",
+                        "image": image_name,
+                        "labels": label_name,
+                        "annotation_count": len(sheet["label_lines"]),
+                        "source": "annotation_crops_on_synthetic_white_page",
+                        "annotations": sheet["annotations"],
+                    }
+                )
+            for sheet in background_sheets:
+                sheet_index = int(sheet["sheet_index"])
+                background_image_name = (
+                    "images/train/"
+                    f"synthetic_schematic_page_{page_num:03d}_{sheet_index:02d}.png"
+                )
+                background_label_name = (
+                    "labels/train/"
+                    f"synthetic_schematic_page_{page_num:03d}_{sheet_index:02d}.txt"
+                )
+                archive.writestr(background_image_name, _png_bytes(sheet["image"]))
+                archive.writestr(
+                    background_label_name,
+                    "\n".join(sheet["label_lines"]) + "\n",
+                )
+                synthetic_background_pages.append(
+                    {
+                        "page": page_num,
+                        "sheet_index": sheet_index,
+                        "split": "train",
+                        "image": background_image_name,
+                        "labels": background_label_name,
+                        "annotation_count": len(sheet["label_lines"]),
+                        "source": "annotation_crops_pasted_on_original_schematic_page",
+                        "warning": (
+                            "Use only after QA confirms the source page does not contain "
+                            "unlabeled target components that should be detected."
+                        ),
+                        "annotations": sheet["annotations"],
+                    }
+                )
+    synthetic_validation_pages = _write_yolov26_synthetic_validation_pages(
+        archive,
+        rng=rng,
+        crop_bank=crop_bank,
+    )
+    balanced_synthetic_pages = _write_yolov26_balanced_synthetic_pages(
+        archive,
+        rng=rng,
+        crop_bank=crop_bank,
+        synthetic_pages=synthetic_pages,
+        synthetic_background_pages=synthetic_background_pages,
+        annotations_by_page=annotations_by_page,
+        val_pages=val_pages,
+        class_ids=class_ids,
+    )
+    return (
+        synthetic_pages,
+        synthetic_background_pages,
+        synthetic_validation_pages,
+        balanced_synthetic_pages,
+    )
+
+
+def _write_yolov26_synthetic_validation_pages(
+    archive: zipfile.ZipFile,
+    *,
+    rng: random.Random,
+    crop_bank: dict[str, list[dict[str, object]]],
+) -> list[dict[str, object]]:
+    pages: list[dict[str, object]] = []
+    sheets: list[dict[str, object]] = []
+    for class_name in sorted(crop_bank):
+        crops = crop_bank.get(class_name) or []
+        if not crops:
+            raise HTTPException(
+                status_code=500,
+                detail=f"cannot create YOLO validation for class {class_name}: no source crops",
+            )
+        for index in range(_YOLOV26_SYNTHETIC_VALIDATION_OBJECTS_PER_CLASS):
+            source = crops[index % len(crops)]
+            crop = _augment_yolov26_crop(source["image"], rng)
+            sheet = _balanced_sheet_for_crop(
+                sheets,
+                rng=rng,
+                crop_width=crop.width,
+                crop_height=crop.height,
+                class_name=class_name,
+            )
+            paste_x, paste_y = sheet["position"]
+            sheet["image"].paste(crop, (paste_x, paste_y))
+            synthetic_box = {
+                "x": paste_x,
+                "y": paste_y,
+                "width": crop.width,
+                "height": crop.height,
+            }
+            synthetic_yolo = _yolo_bbox_from_annotation(
+                {"id": source.get("source_annotation_id"), "bbox": synthetic_box}
+            )
+            class_id = int(source["class_id"])
+            sheet["label_lines"].append(
+                f"{class_id} "
+                + " ".join(
+                    f"{value:.6f}"
+                    for value in (
+                        synthetic_yolo["x_center"],
+                        synthetic_yolo["y_center"],
+                        synthetic_yolo["width"],
+                        synthetic_yolo["height"],
+                    )
+                )
+            )
+            sheet["placements"].append(
+                (
+                    paste_x,
+                    paste_y,
+                    paste_x + crop.width,
+                    paste_y + crop.height,
+                )
+            )
+            sheet["annotations"].append(
+                {
+                    "source_annotation_id": source.get("source_annotation_id"),
+                    "source_page": source.get("source_page"),
+                    "source_crop": source.get("crop"),
+                    "source": "class_coverage_clean_validation_crop",
+                    "class_id": class_id,
+                    "class_name": class_name,
+                    "bbox_px": synthetic_box,
+                    "bbox_yolo": synthetic_yolo,
+                }
+            )
+
+    for sheet in sheets:
+        sheet_index = int(sheet["sheet_index"])
+        image_name = f"images/val/synthetic_validation_page_{sheet_index:02d}.png"
+        label_name = f"labels/val/synthetic_validation_page_{sheet_index:02d}.txt"
+        archive.writestr(image_name, _png_bytes(sheet["image"]))
+        archive.writestr(label_name, "\n".join(sheet["label_lines"]) + "\n")
+        pages.append(
+            {
+                "sheet_index": sheet_index,
+                "split": "val",
+                "image": image_name,
+                "labels": label_name,
+                "annotation_count": len(sheet["label_lines"]),
+                "source": "class_coverage_clean_validation_crop",
+                "annotations": sheet["annotations"],
+            }
+        )
+    return pages
+
+
+def _write_yolov26_balanced_synthetic_pages(
+    archive: zipfile.ZipFile,
+    *,
+    rng: random.Random,
+    crop_bank: dict[str, list[dict[str, object]]],
+    synthetic_pages: list[dict[str, object]],
+    synthetic_background_pages: list[dict[str, object]],
+    annotations_by_page: dict[int, list[tuple[dict[str, object], dict[str, object]]]],
+    val_pages: set[int],
+    class_ids: dict[str, int],
+) -> list[dict[str, object]]:
+    counts = {class_name: 0 for class_name in class_ids}
+    for page_num, page_records in annotations_by_page.items():
+        if page_num in val_pages:
+            continue
+        for annotation, _ in page_records:
+            counts[_yolov26_record_class_name(annotation)] += 1
+    for page in [*synthetic_pages, *synthetic_background_pages]:
+        for annotation in page.get("annotations") or []:
+            if not isinstance(annotation, dict):
+                continue
+            class_name = str(annotation.get("class_name") or "")
+            if class_name in counts:
+                counts[class_name] += 1
+
+    deficit_by_class = {
+        class_name: max(0, _YOLOV26_MIN_TRAINING_OBJECTS_PER_CLASS - count)
+        for class_name, count in counts.items()
+    }
+    if not any(deficit_by_class.values()):
+        return []
+
+    pages: list[dict[str, object]] = []
+    sheets: list[dict[str, object]] = []
+    for class_name in sorted(deficit_by_class):
+        deficit = deficit_by_class[class_name]
+        if deficit <= 0:
+            continue
+        crops = crop_bank.get(class_name) or []
+        if not crops:
+            raise HTTPException(
+                status_code=500,
+                detail=f"cannot balance YOLO class {class_name}: no source crops",
+            )
+        for index in range(deficit):
+            source = crops[index % len(crops)]
+            crop = _augment_yolov26_crop(source["image"], rng)
+            sheet = _balanced_sheet_for_crop(
+                sheets,
+                rng=rng,
+                crop_width=crop.width,
+                crop_height=crop.height,
+                class_name=class_name,
+            )
+            paste_x, paste_y = sheet["position"]
+            sheet["image"].paste(crop, (paste_x, paste_y))
+            synthetic_box = {
+                "x": paste_x,
+                "y": paste_y,
+                "width": crop.width,
+                "height": crop.height,
+            }
+            synthetic_yolo = _yolo_bbox_from_annotation(
+                {"id": source.get("source_annotation_id"), "bbox": synthetic_box}
+            )
+            class_id = int(source["class_id"])
+            sheet["label_lines"].append(
+                f"{class_id} "
+                + " ".join(
+                    f"{value:.6f}"
+                    for value in (
+                        synthetic_yolo["x_center"],
+                        synthetic_yolo["y_center"],
+                        synthetic_yolo["width"],
+                        synthetic_yolo["height"],
+                    )
+                )
+            )
+            sheet["placements"].append(
+                (
+                    paste_x,
+                    paste_y,
+                    paste_x + crop.width,
+                    paste_y + crop.height,
+                )
+            )
+            sheet["annotations"].append(
+                {
+                    "source_annotation_id": source.get("source_annotation_id"),
+                    "source_page": source.get("source_page"),
+                    "source_crop": source.get("crop"),
+                    "source": "balanced_class_clean_synthetic_crop",
+                    "class_id": class_id,
+                    "class_name": class_name,
+                    "bbox_px": synthetic_box,
+                    "bbox_yolo": synthetic_yolo,
+                }
+            )
+
+    for sheet in sheets:
+        sheet_index = int(sheet["sheet_index"])
+        image_name = f"images/train/balanced_synthetic_page_{sheet_index:02d}.png"
+        label_name = f"labels/train/balanced_synthetic_page_{sheet_index:02d}.txt"
+        archive.writestr(image_name, _png_bytes(sheet["image"]))
+        archive.writestr(label_name, "\n".join(sheet["label_lines"]) + "\n")
+        pages.append(
+            {
+                "sheet_index": sheet_index,
+                "split": "train",
+                "image": image_name,
+                "labels": label_name,
+                "annotation_count": len(sheet["label_lines"]),
+                "source": "balanced_class_clean_synthetic_crop",
+                "annotations": sheet["annotations"],
+            }
+        )
+    return pages
+
+
+def _balanced_sheet_for_crop(
+    sheets: list[dict[str, object]],
+    *,
+    rng: random.Random,
+    crop_width: int,
+    crop_height: int,
+    class_name: str,
+) -> dict[str, object]:
+    for sheet in sheets:
+        position = _try_synthetic_crop_position(
+            rng,
+            crop_width,
+            crop_height,
+            sheet["placements"],
+        )
+        if position:
+            sheet["position"] = position
+            return sheet
+
+    sheet = {
+        "sheet_index": len(sheets) + 1,
+        "image": Image.new("RGB", (_PAGE_WIDTH_PX, _PAGE_HEIGHT_PX), "white"),
+        "label_lines": [],
+        "annotations": [],
+        "placements": [],
+    }
+    position = _try_synthetic_crop_position(
+        rng,
+        crop_width,
+        crop_height,
+        sheet["placements"],
+    )
+    if not position:
+        raise HTTPException(
+            status_code=500,
+            detail=f"could not place balanced YOLO crop for class {class_name}",
+        )
+    sheet["position"] = position
+    sheets.append(sheet)
+    return sheet
+
+
+def _augment_yolov26_crop(crop: Image.Image, rng: random.Random) -> Image.Image:
+    _ = rng
+    return crop.convert("RGB")
+
+
+def _clean_sheet_for_crop(
+    sheets: list[dict[str, object]],
+    *,
+    rng: random.Random,
+    page_num: int,
+    crop_width: int,
+    crop_height: int,
+    annotation_id: str,
+) -> dict[str, object]:
+    for sheet in sheets:
+        position = _try_synthetic_crop_position(
+            rng,
+            crop_width,
+            crop_height,
+            sheet["placements"],
+        )
+        if position:
+            sheet["position"] = position
+            return sheet
+
+    sheet = {
+        "sheet_index": len(sheets) + 1,
+        "image": Image.new("RGB", (_PAGE_WIDTH_PX, _PAGE_HEIGHT_PX), "white"),
+        "label_lines": [],
+        "annotations": [],
+        "placements": [],
+    }
+    position = _try_synthetic_crop_position(
+        rng,
+        crop_width,
+        crop_height,
+        sheet["placements"],
+    )
+    if not position:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "could not place YOLO crop for annotation "
+                f"{annotation_id} on a fresh clean synthetic page {page_num}"
+            ),
+        )
+    sheet["position"] = position
+    sheets.append(sheet)
+    return sheet
+
+
+def _background_sheet_for_crop(
+    sheets: list[dict[str, object]],
+    *,
+    rng: random.Random,
+    source_image: Image.Image,
+    base_label_lines: list[str],
+    base_annotations: list[dict[str, object]],
+    base_placements: list[tuple[int, int, int, int]],
+    page_num: int,
+    crop_width: int,
+    crop_height: int,
+    annotation_id: str,
+) -> dict[str, object]:
+    for sheet in sheets:
+        position = _try_synthetic_crop_position(
+            rng,
+            crop_width,
+            crop_height,
+            sheet["placements"],
+        )
+        if position:
+            sheet["position"] = position
+            return sheet
+
+    sheet = {
+        "sheet_index": len(sheets) + 1,
+        "image": source_image.copy(),
+        "label_lines": list(base_label_lines),
+        "annotations": [dict(annotation) for annotation in base_annotations],
+        "placements": list(base_placements),
+    }
+    position = _try_synthetic_crop_position(
+        rng,
+        crop_width,
+        crop_height,
+        sheet["placements"],
+    )
+    if not position:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "could not place YOLO crop for annotation "
+                f"{annotation_id} on a fresh schematic-background synthetic page {page_num}"
+            ),
+        )
+    sheet["position"] = position
+    sheets.append(sheet)
+    return sheet
+
+
+def _synthetic_crop_position(
+    rng: random.Random,
+    width: int,
+    height: int,
+    placements: list[tuple[int, int, int, int]],
+    *,
+    annotation_id: str,
+) -> tuple[int, int]:
+    margin = 32
+    max_x = _PAGE_WIDTH_PX - width - margin
+    max_y = _PAGE_HEIGHT_PX - height - margin
+    if max_x <= margin or max_y <= margin:
+        raise HTTPException(
+            status_code=500,
+            detail=f"YOLO crop for annotation {annotation_id} is too large for synthetic page",
+        )
+    position = _try_synthetic_crop_position(rng, width, height, placements)
+    if position:
+        return position
+    raise HTTPException(
+        status_code=500,
+        detail=f"could not place YOLO crop for annotation {annotation_id} on synthetic page",
+    )
+
+
+def _try_synthetic_crop_position(
+    rng: random.Random,
+    width: int,
+    height: int,
+    placements: list[tuple[int, int, int, int]],
+) -> tuple[int, int] | None:
+    margin = 32
+    max_x = _PAGE_WIDTH_PX - width - margin
+    max_y = _PAGE_HEIGHT_PX - height - margin
+    if max_x <= margin or max_y <= margin:
+        return None
+    for _ in range(500):
+        x = rng.randint(margin, max_x)
+        y = rng.randint(margin, max_y)
+        candidate = (x, y, x + width, y + height)
+        if all(not _boxes_overlap(candidate, placed, padding=24) for placed in placements):
+            return x, y
+    return None
+
+
+def _boxes_overlap(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+    *,
+    padding: int,
+) -> bool:
+    return not (
+        left[2] + padding <= right[0]
+        or right[2] + padding <= left[0]
+        or left[3] + padding <= right[1]
+        or right[3] + padding <= left[1]
+    )
+
+
+def _png_bytes(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _safe_archive_stem(value: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return stem[:120] or "annotation"
+
+
+def _yolov26_data_yaml(*, has_val: bool, class_names: list[str]) -> str:
+    val_path = "images/val" if has_val else "images/train"
+    names = "\n".join(f"  {index}: {name}" for index, name in enumerate(class_names))
+    return (
+        "path: .\n"
+        "train: images/train\n"
+        f"val: {val_path}\n"
+        "names:\n"
+        f"{names}\n"
+    )
+
+
+def _yolov26_readme() -> str:
+    return """# Atlas YOLOv26 component dataset
+
+This bundle is generated from saved Extraction Studio YOLO workspace annotations.
+
+Files:
+- `data.yaml`: YOLO dataset config.
+- `images/train` and `labels/train`: training pages and YOLO label files.
+- `images/val` and `labels/val`: validation split when at least five annotated pages exist.
+- `manifest.json`: Atlas sidecar metadata for each bbox.
+
+Class policy:
+- YOLO classes are resolved component-family labels such as `ELB`, `MC`, `WHM`, `INV`, and `MCB`.
+- Parts-list description, part number, selected symbol, and context text are retained in `manifest.json`.
+- `crops/<class>/` contains one crop per saved annotation for manual QA.
+- `images/train/synthetic_page_*.png` contains deterministic synthetic training sheets made by pasting saved annotation crops onto clean white pages.
+- `images/train/synthetic_schematic_page_*.png` contains deterministic augmentation sheets made by pasting saved annotation crops onto the original schematic page while preserving labels for the original saved annotations too. QA these before training because unlabeled visible components on the background page are still training negatives.
+"""
+
+
+async def _export_qwen3vl_colab_dataset(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+    classes: str | None,
+) -> Response:
+    bundle = await _build_qwen3vl_colab_dataset_bundle(
+        project,
+        document_id,
+        annotation_mode,
+        classes,
+    )
+    content = bundle["zip_bytes"]
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="atlas-qwen3vl-colab-dataset.zip"'
+            ),
+            "Content-Length": str(len(content)),
+        },
+    )
+
+
+async def _build_qwen3vl_colab_dataset_bundle(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+    classes: str | None,
+) -> dict[str, object]:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    selected_classes = _parse_dataset_class_filter(classes)
+    rows = await _load_component_dataset_rows(project, document_id, annotation_mode)
+
+    candidate_records: list[tuple[dict[str, object], dict[str, object]]] = []
+    for row in rows:
+        record = _qwen_component_record(row)
+        candidate_records.append((row, record))
+
+    _canonicalize_training_record_classes([record for _, record in candidate_records])
+
+    examples_by_page: dict[int, list[dict[str, object]]] = {}
+    for row, record in candidate_records:
+        if selected_classes and not _record_matches_class_filter(record, selected_classes):
+            continue
+        examples_by_page.setdefault(int(row["page_num"]), []).append(record)
+
+    if not examples_by_page:
+        raise HTTPException(
+            status_code=404,
+            detail="no component annotations matched the qwen3vl dataset filter",
+        )
+
+    buffer = io.BytesIO()
+    extracted_files: list[tuple[str, bytes, str]] = []
+    class_counts: dict[str, int] = {}
+    schematic_class_counts: dict[str, int] = {}
+    manifest = {
+        "dataset": "atlas_qwen3vl_schematic_grounding_v1",
+        "document_id": document_id,
+        "annotation_mode": annotation_mode,
+        "image_size": [_PAGE_WIDTH_PX, _PAGE_HEIGHT_PX],
+        "class_filter": sorted(selected_classes),
+        "pages": [],
+        "sweep_pages": [],
+        "total_annotations": 0,
+        "class_counts": class_counts,
+        "schematic_class_counts": schematic_class_counts,
+    }
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        jsonl_lines: list[str] = []
+        for page_num in sorted(examples_by_page):
+            annotations = examples_by_page[page_num]
+            image_path = _workbench_page_image_path(document_id, page_num)
+            image_name = f"images/{document_id}-page-{page_num:03d}.png"
+            archive.write(image_path, image_name, compress_type=zipfile.ZIP_STORED)
+            extracted_files.append((image_name, image_path.read_bytes(), "image/png"))
+            page_row = {
+                "image": image_name,
+                "page": page_num,
+                "image_size": [_PAGE_WIDTH_PX, _PAGE_HEIGHT_PX],
+                "task": "schematic_component_grounding",
+                "annotations": annotations,
+            }
+            jsonl_lines.append(json.dumps(page_row, ensure_ascii=False))
+            manifest["pages"].append(
+                {
+                    "page": page_num,
+                    "image": image_name,
+                    "annotation_count": len(annotations),
+                }
+            )
+            manifest["total_annotations"] += len(annotations)
+            for annotation in annotations:
+                class_name = str(annotation.get("class") or "unknown")
+                schematic_class = str(
+                    annotation.get("schematic_class") or class_name
+                )
+                class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                schematic_class_counts[schematic_class] = (
+                    schematic_class_counts.get(schematic_class, 0) + 1
+                )
+
+        for page_num in sorted(examples_by_page):
+            image_path = _qwen3vl_sweep_page_image_path(page_num)
+            if image_path is None:
+                continue
+            image_name = f"sweep_images/{document_id}-page-{page_num:03d}.png"
+            archive.write(image_path, image_name, compress_type=zipfile.ZIP_STORED)
+            extracted_files.append((image_name, image_path.read_bytes(), "image/png"))
+            manifest["sweep_pages"].append(
+                {
+                    "page": page_num,
+                    "image": image_name,
+                }
+            )
+
+        dataset_jsonl = ("\n".join(jsonl_lines) + "\n").encode("utf-8")
+        manifest_json = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+        readme = _qwen_dataset_readme().encode("utf-8")
+        notebook = _qwen_colab_notebook().encode("utf-8")
+        archive.writestr("dataset.jsonl", dataset_jsonl)
+        archive.writestr("manifest.json", manifest_json)
+        archive.writestr("README.md", readme)
+        archive.writestr("qwen3vl_colab_starter.ipynb", notebook)
+        extracted_files.extend(
+            [
+                ("dataset.jsonl", dataset_jsonl, "application/jsonl"),
+                ("manifest.json", manifest_json, "application/json"),
+                ("README.md", readme, "text/markdown"),
+            ]
+        )
+
+    buffer.seek(0)
+    return {
+        "zip_bytes": buffer.getvalue(),
+        "manifest": manifest,
+        "extracted_files": extracted_files,
+    }
+
+
+async def _export_qwen3vl_colab_drive(
+    project: dict[str, object],
+    document_id: str,
+    body: WorkbenchQwenDriveExport,
+) -> dict[str, object]:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    drive_folder = _normalize_qwen_drive_folder(body.driveFolder)
+    export_name = _qwen_drive_export_name(body.exportName)
+    bundle = await _build_qwen3vl_colab_dataset_bundle(
+        project,
+        document_id,
+        body.annotationMode,
+        body.classes,
+    )
+    notebook = _qwen_colab_pro_plus_notebook(
+        drive_folder=drive_folder,
+        export_name=export_name,
+        model_id=body.modelId,
+    ).encode("utf-8")
+    zip_bytes = bundle["zip_bytes"]
+    if not isinstance(zip_bytes, bytes):
+        raise HTTPException(status_code=500, detail="qwen dataset zip generation failed")
+    extracted_files = bundle["extracted_files"]
+    if not isinstance(extracted_files, list):
+        raise HTTPException(status_code=500, detail="qwen dataset file generation failed")
+
+    headers = await _google_drive_auth_headers()
+    async with httpx.AsyncClient(timeout=120) as client:
+        base_folder_id = await _drive_ensure_folder_path(client, headers, drive_folder)
+        export_folder = await _drive_create_folder(client, headers, export_name, base_folder_id)
+        dataset_folder = await _drive_create_folder(
+            client,
+            headers,
+            "dataset",
+            str(export_folder["id"]),
+        )
+        uploaded_files = [
+            await _drive_upload_file(
+                client,
+                headers,
+                "qwen3vl_colab_pro_plus_starter.ipynb",
+                notebook,
+                "application/x-ipynb+json",
+                str(export_folder["id"]),
+            ),
+            await _drive_upload_file(
+                client,
+                headers,
+                "atlas-qwen3vl-colab-dataset.zip",
+                zip_bytes,
+                "application/zip",
+                str(export_folder["id"]),
+            ),
+        ]
+        folder_cache = {"": str(dataset_folder["id"])}
+        for item in extracted_files:
+            if not isinstance(item, tuple) or len(item) != 3:
+                continue
+            relative_path, content, mime_type = item
+            if not isinstance(relative_path, str) or not isinstance(content, bytes):
+                continue
+            parent_id = await _drive_ensure_relative_folder_path(
+                client,
+                headers,
+                str(dataset_folder["id"]),
+                str(Path(relative_path).parent).replace("\\", "/"),
+                folder_cache,
+            )
+            uploaded_files.append(
+                await _drive_upload_file(
+                    client,
+                    headers,
+                    Path(relative_path).name,
+                    content,
+                    str(mime_type),
+                    parent_id,
+                )
+            )
+
+    return {
+        "status": "saved",
+        "driveFolder": f"{drive_folder}/{export_name}",
+        "folder": export_folder,
+        "datasetFolder": dataset_folder,
+        "files": uploaded_files,
+        "manifest": bundle["manifest"],
+    }
+
+
+def _normalize_qwen_drive_folder(value: str) -> str:
+    normalized = "/".join(
+        segment.strip().lower()
+        for segment in (value or _QWEN3VL_DRIVE_FOLDER).replace("\\", "/").split("/")
+        if segment.strip()
+    )
+    return normalized or _QWEN3VL_DRIVE_FOLDER
+
+
+def _qwen_drive_export_name(value: str | None = None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        raw = f"atlas-qwen3vl-pro-plus-{time.strftime('%Y%m%d-%H%M%S')}"
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", raw).strip(".-")
+    return slug or f"atlas-qwen3vl-pro-plus-{time.strftime('%Y%m%d-%H%M%S')}"
+
+
+async def _google_drive_auth_headers() -> dict[str, str]:
+    try:
+        credentials, _ = google.auth.default(scopes=[_GOOGLE_DRIVE_SCOPE])
+        request = google.auth.transport.requests.Request()
+        await asyncio.to_thread(credentials.refresh, request)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Google Drive export needs local Application Default Credentials "
+                    "authorized with Drive scope."
+                ),
+                "reauthCommand": (
+                    "gcloud auth application-default login "
+                    "--scopes=https://www.googleapis.com/auth/cloud-platform,"
+                    "https://www.googleapis.com/auth/drive"
+                ),
+                "error": str(exc),
+            },
+        ) from exc
+    return {"Authorization": f"Bearer {credentials.token}"}
+
+
+async def _drive_ensure_folder_path(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    path: str,
+) -> str:
+    parent_id = "root"
+    for segment in [part for part in path.split("/") if part]:
+        folder = await _drive_find_folder(client, headers, segment, parent_id)
+        if folder is None:
+            folder = await _drive_create_folder(client, headers, segment, parent_id)
+        parent_id = str(folder["id"])
+    return parent_id
+
+
+async def _drive_ensure_relative_folder_path(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    root_folder_id: str,
+    relative_path: str,
+    cache: dict[str, str],
+) -> str:
+    clean = "" if relative_path in ("", ".") else relative_path.strip("/")
+    if clean in cache:
+        return cache[clean]
+    parent_id = root_folder_id
+    prefix = ""
+    for segment in [part for part in clean.split("/") if part]:
+        prefix = f"{prefix}/{segment}" if prefix else segment
+        if prefix in cache:
+            parent_id = cache[prefix]
+            continue
+        folder = await _drive_find_folder(client, headers, segment, parent_id)
+        if folder is None:
+            folder = await _drive_create_folder(client, headers, segment, parent_id)
+        parent_id = str(folder["id"])
+        cache[prefix] = parent_id
+    return parent_id
+
+
+async def _drive_find_folder(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    name: str,
+    parent_id: str,
+) -> dict[str, object] | None:
+    query = (
+        f"mimeType='{_GOOGLE_DRIVE_FOLDER_MIME}' and "
+        f"name='{_drive_query_literal(name)}' and "
+        f"'{_drive_query_literal(parent_id)}' in parents and trashed=false"
+    )
+    response = await client.get(
+        "https://www.googleapis.com/drive/v3/files",
+        headers=headers,
+        params={
+            "q": query,
+            "fields": "files(id,name,webViewLink)",
+            "pageSize": "1",
+            "supportsAllDrives": "true",
+        },
+    )
+    _raise_drive_error(response, "find Google Drive folder")
+    files = response.json().get("files") or []
+    return files[0] if files else None
+
+
+async def _drive_create_folder(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    name: str,
+    parent_id: str,
+) -> dict[str, object]:
+    response = await client.post(
+        "https://www.googleapis.com/drive/v3/files",
+        headers={**headers, "Content-Type": "application/json"},
+        params={"fields": "id,name,webViewLink", "supportsAllDrives": "true"},
+        json={
+            "name": name,
+            "mimeType": _GOOGLE_DRIVE_FOLDER_MIME,
+            "parents": [parent_id],
+        },
+    )
+    _raise_drive_error(response, "create Google Drive folder")
+    return response.json()
+
+
+async def _drive_upload_file(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    name: str,
+    content: bytes,
+    mime_type: str,
+    parent_id: str,
+) -> dict[str, object]:
+    boundary = f"atlas-{uuid.uuid4().hex}"
+    metadata = json.dumps({"name": name, "parents": [parent_id]}).encode("utf-8")
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("utf-8"),
+            b"Content-Type: application/json; charset=UTF-8\r\n\r\n",
+            metadata,
+            b"\r\n",
+            f"--{boundary}\r\n".encode("utf-8"),
+            f"Content-Type: {mime_type}\r\n\r\n".encode("utf-8"),
+            content,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("utf-8"),
+        ]
+    )
+    response = await client.post(
+        "https://www.googleapis.com/upload/drive/v3/files",
+        headers={
+            **headers,
+            "Content-Type": f"multipart/related; boundary={boundary}",
+        },
+        params={
+            "uploadType": "multipart",
+            "fields": "id,name,mimeType,webViewLink,webContentLink",
+            "supportsAllDrives": "true",
+        },
+        content=body,
+    )
+    _raise_drive_error(response, "upload Google Drive file")
+    return response.json()
+
+
+def _drive_query_literal(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _raise_drive_error(response: httpx.Response, action: str) -> None:
+    if response.is_success:
+        return
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = response.text
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "message": f"Failed to {action}.",
+            "status": response.status_code,
+            "error": payload,
+        },
+    )
+
+
+async def _launch_vision_training_colab_enterprise_run(
+    project: dict[str, object],
+    document_id: str,
+    body: WorkbenchVisionTrainingLaunch,
+) -> dict[str, object]:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    trainer = _normalize_training_token(body.trainer)
+    if trainer != "qwen3vl":
+        raise HTTPException(
+            status_code=400,
+            detail=f"trainer '{body.trainer}' is not wired yet",
+        )
+    if not body.gcsBucket.strip():
+        raise HTTPException(status_code=400, detail="gcsBucket is required")
+    if not body.runtimeTemplate.strip():
+        raise HTTPException(status_code=400, detail="runtimeTemplate is required")
+    if bool(body.userEmail.strip()) == bool(body.serviceAccount.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="specify exactly one of userEmail or serviceAccount",
+        )
+    if not _COLAB_ENTERPRISE_SCRIPT.exists():
+        raise HTTPException(status_code=500, detail="Colab Enterprise launcher script missing")
+
+    active_run = await _active_vision_training_run(project, document_id)
+    if active_run is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "a Colab Enterprise training run is already active",
+                "training_run_id": active_run.get("training_run_id"),
+                "status": active_run.get("status"),
+                "phase": active_run.get("phase"),
+                "display_name": active_run.get("display_name"),
+            },
+        )
+
+    display_name = f"atlas-{trainer}-{time.strftime('%Y%m%d-%H%M%S')}"
+    training_run_id = await _insert_vision_training_run(
+        project,
+        document_id,
+        body,
+        trainer=trainer,
+        display_name=display_name,
+    )
+    audit = await _audit_vision_training_dataset(
+        project,
+        document_id,
+        body.annotationMode,
+        body.classes,
+    )
+    if body.launchMode in {"execute", "eval_run", "gpu_smoke"} and audit["blocker_count"] > 0:
+        await _update_vision_training_run(
+            training_run_id,
+            status="blocked",
+            phase="dataset_qa_blocked",
+            error_message="dataset QA blockers must be resolved before execution",
+            metadata={
+                "launcher": "colab_enterprise",
+                "launchMode": body.launchMode,
+                "executionSkipped": True,
+                "datasetAudit": audit,
+            },
+        )
+        return await _get_vision_training_run(project, document_id, training_run_id)
+    command = _vision_training_launch_command(
+        body,
+        trainer=trainer,
+        display_name=display_name,
+    )
+    await _update_vision_training_run(
+        training_run_id,
+        status="staging",
+        phase="exporting_dataset",
+        metadata={
+            "command": command,
+            "launchMode": body.launchMode,
+            "executionSkipped": body.launchMode not in {"execute", "eval_run", "gpu_smoke"},
+            "datasetAudit": audit,
+        },
+    )
+    asyncio.create_task(
+        _complete_vision_training_colab_launch(
+            project,
+            document_id,
+            training_run_id,
+            body.launchMode,
+            command,
+        )
+    )
+    return await _get_vision_training_run(project, document_id, training_run_id)
+
+
+async def _complete_vision_training_colab_launch(
+    project: dict[str, object],
+    document_id: str,
+    training_run_id: uuid.UUID,
+    launch_mode: str,
+    command: list[str],
+) -> None:
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            command,
+            cwd=str(_REPO_ROOT),
+            text=True,
+            capture_output=True,
+            timeout=240,
+            check=False,
+        )
+        payload = _parse_colab_launcher_payload(result.stdout)
+        execution_payload = _parse_last_json_object(result.stdout)
+        execution_name = _extract_execution_name(execution_payload)
+        if result.returncode == 0 and launch_mode in {"execute", "eval_run", "gpu_smoke"}:
+            status = "submitted"
+            phase = "colab_execution_submitted"
+        elif result.returncode == 0 and launch_mode == "stage_preflight":
+            status = "preflight_complete"
+            phase = "gcs_stage_complete_execution_skipped"
+        elif result.returncode == 0:
+            status = "preflight_complete"
+            phase = "local_preflight_complete"
+        else:
+            status = "failed"
+            phase = "submission_failed"
+        error_message = None if result.returncode == 0 else _clean_text(result.stderr) or "Colab Enterprise submission failed"
+        await _update_vision_training_run(
+            training_run_id,
+            status=status,
+            phase=phase,
+            dataset_uri=_clean_text(payload.get("dataset_uri")),
+            notebook_uri=_clean_text(payload.get("notebook_uri")),
+            output_uri=_clean_text(payload.get("output_uri")),
+            execution_name=execution_name,
+            execution_id=_execution_id_from_name(execution_name),
+            stdout=result.stdout,
+            stderr=result.stderr,
+            error_message=error_message,
+            execution_payload=execution_payload if isinstance(execution_payload, dict) else {},
+        )
+    except Exception as exc:
+        await _update_vision_training_run(
+            training_run_id,
+            status="failed",
+            phase="submission_failed",
+            error_message=f"Colab Enterprise background launch failed: {exc}",
+        )
+
+
+async def _colab_enterprise_runtime_templates() -> dict[str, object]:
+    gcloud = _resolve_gcloud_executable()
+    if not gcloud:
+        return {
+            "source": "gcloud_colab_runtime_templates",
+            "status": "unavailable",
+            "error": "gcloud executable not found",
+            "items": [],
+        }
+    command = [
+        gcloud,
+        "colab",
+        "runtime-templates",
+        "list",
+        f"--region={_COLAB_ENTERPRISE_REGION}",
+        "--format=json",
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run,
+        command,
+        cwd=str(_REPO_ROOT),
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {
+            "source": "gcloud_colab_runtime_templates",
+            "status": "unavailable",
+            "error": _clean_text(result.stderr) or "runtime templates unavailable",
+            "items": [],
+        }
+    try:
+        templates = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "source": "gcloud_colab_runtime_templates",
+            "status": "unavailable",
+            "error": f"failed to parse runtime templates: {exc}",
+            "items": [],
+        }
+    items = [
+        _colab_runtime_template_row(template)
+        for template in templates
+        if isinstance(template, dict)
+    ]
+    return {
+        "source": "gcloud_colab_runtime_templates",
+        "status": "ready",
+        "region": _COLAB_ENTERPRISE_REGION,
+        "items": sorted(items, key=_colab_runtime_template_sort_key, reverse=True),
+    }
+
+
+def _best_colab_runtime_template_id(runtime_templates: dict[str, object]) -> str:
+    items = runtime_templates.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+    best = max(
+        [item for item in items if isinstance(item, dict)],
+        key=_colab_runtime_template_sort_key,
+        default=None,
+    )
+    if not isinstance(best, dict):
+        return ""
+    return _clean_text(best.get("id") or best.get("name") or best.get("displayName"))
+
+
+def _colab_runtime_template_sort_key(item: dict[str, object]) -> tuple[int, int, int, int]:
+    accelerator = _clean_text(item.get("acceleratorType")).upper()
+    accelerator_count = int(item.get("acceleratorCount") or 0)
+    disk_size = int(item.get("dataDiskSizeGb") or 0)
+    machine_type = _clean_text(item.get("machineType")).lower()
+    return (
+        _colab_accelerator_rank(accelerator) * max(1, accelerator_count),
+        accelerator_count,
+        _colab_machine_rank(machine_type),
+        disk_size,
+    )
+
+
+def _colab_accelerator_rank(accelerator: str) -> int:
+    if "GB200" in accelerator:
+        return 1000
+    if "H200" in accelerator:
+        return 950
+    if "H100" in accelerator:
+        return 900
+    if "A100_80GB" in accelerator:
+        return 820
+    if "A100" in accelerator:
+        return 800
+    if "V100" in accelerator:
+        return 600
+    if "L4" in accelerator:
+        return 450
+    if "T4" in accelerator:
+        return 300
+    if accelerator and accelerator != "CPU":
+        return 100
+    return 0
+
+
+def _colab_machine_rank(machine_type: str) -> int:
+    if "ultra" in machine_type:
+        return 500
+    if "highgpu" in machine_type:
+        return 420
+    if "megagpu" in machine_type:
+        return 410
+    if "highmem" in machine_type:
+        return 350
+    if machine_type.startswith("a"):
+        return 300
+    if machine_type.startswith("g"):
+        return 250
+    return 0
+
+
+def _resolve_gcloud_executable() -> str:
+    for candidate in ("gcloud.cmd", "gcloud.exe", "gcloud"):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    if os.name == "nt":
+        for root in (
+            os.environ.get("ProgramFiles(x86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ):
+            if not root:
+                continue
+            path = (
+                Path(root)
+                / "Google"
+                / "Cloud SDK"
+                / "google-cloud-sdk"
+                / "bin"
+                / "gcloud.cmd"
+            )
+            if path.exists():
+                return str(path)
+    return ""
+
+
+def _colab_runtime_template_row(template: dict[str, object]) -> dict[str, object]:
+    machine_spec = template.get("machineSpec") if isinstance(template, dict) else {}
+    disk_spec = template.get("dataPersistentDiskSpec") if isinstance(template, dict) else {}
+    idle_config = template.get("idleShutdownConfig") if isinstance(template, dict) else {}
+    if not isinstance(machine_spec, dict):
+        machine_spec = {}
+    if not isinstance(disk_spec, dict):
+        disk_spec = {}
+    if not isinstance(idle_config, dict):
+        idle_config = {}
+    name = _clean_text(template.get("name"))
+    template_id = name.rstrip("/").split("/")[-1] if name else _clean_text(template.get("displayName"))
+    accelerator_count = int(machine_spec.get("acceleratorCount") or 0)
+    return {
+        "id": template_id,
+        "name": name,
+        "displayName": _clean_text(template.get("displayName")) or template_id,
+        "machineType": _clean_text(machine_spec.get("machineType")) or "unknown",
+        "acceleratorType": _clean_text(machine_spec.get("acceleratorType")) or "CPU",
+        "acceleratorCount": accelerator_count,
+        "dataDiskType": _clean_text(disk_spec.get("diskType")) or "",
+        "dataDiskSizeGb": int(disk_spec.get("diskSizeGb") or 0),
+        "idleTimeout": _clean_text(idle_config.get("idleTimeout")) or "",
+        "createTime": _clean_text(template.get("createTime")),
+        "updateTime": _clean_text(template.get("updateTime")),
+        "cost": {
+            "status": "not_exposed_by_colab_runtime_template_api",
+            "estimatedHourlyCostUsd": None,
+            "estimatedRunCostUsd": None,
+        },
+        "quota": {
+            "status": "not_exposed_by_colab_runtime_template_api",
+            "gpuHoursRemaining": None,
+            "computeUnitsRemaining": None,
+        },
+    }
+
+
+def _vision_training_launch_command(
+    body: WorkbenchVisionTrainingLaunch,
+    *,
+    trainer: str,
+    display_name: str,
+) -> list[str]:
+    if trainer != "qwen3vl":
+        raise ValueError(f"unsupported trainer: {trainer}")
+    command = [
+        sys.executable,
+        str(_COLAB_ENTERPRISE_SCRIPT),
+        "--agent-base",
+        _colab_enterprise_agent_base(),
+        "--project-id",
+        str(DEFAULT_PROJECT_ID),
+        "--document-id",
+        _DEFAULT_DOCUMENT_ID,
+        "--annotation-mode",
+        body.annotationMode,
+        "--classes",
+        body.classes,
+        "--region",
+        body.region,
+        "--gcs-bucket",
+        body.gcsBucket,
+        "--gcs-prefix",
+        body.gcsPrefix,
+        "--runtime-template",
+        body.runtimeTemplate,
+        "--model-id",
+        body.modelId,
+        "--display-name",
+        display_name,
+        "--execution-timeout",
+        body.executionTimeout,
+        "--async-submit",
+    ]
+    if body.launchMode in {"eval_run", "gpu_smoke"}:
+        command.extend(["--max-steps", "10"])
+        command.extend(["--eval-steps", "2"])
+        command.extend(["--early-stopping-patience", "2"])
+        command.extend(["--save-total-limit", "2"])
+    if body.userEmail.strip():
+        command.extend(["--user-email", body.userEmail.strip()])
+    if body.serviceAccount.strip():
+        command.extend(["--service-account", body.serviceAccount.strip()])
+    if body.launchMode == "stage_preflight":
+        command.append("--stage-only")
+    elif body.launchMode == "local_preflight":
+        command.append("--dry-run")
+    return command
+
+
+async def _audit_vision_training_dataset(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+    classes: str,
+) -> dict[str, object]:
+    rows = await _load_component_dataset_rows(project, document_id, annotation_mode)
+    selected_classes = _parse_dataset_class_filter(classes)
+    training_records: list[dict[str, object]] = []
+    blockers: list[dict[str, object]] = []
+    class_counts: dict[str, int] = {}
+
+    candidate_records = [(row, _qwen_component_record(row)) for row in rows]
+    _canonicalize_training_record_classes([record for _, record in candidate_records])
+
+    for row, record in candidate_records:
+        if selected_classes and not _record_matches_class_filter(record, selected_classes):
+            continue
+        training_records.append(record)
+        class_name = str(record.get("class") or "UNKNOWN")
+        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
+        root_bbox = record.get("bbox")
+        issues: list[str] = []
+        if isinstance(root_bbox, list) and len(root_bbox) == 4:
+            x1, y1, x2, y2 = [float(value or 0) for value in root_bbox]
+            width = max(0.0, x2 - x1)
+            height = max(0.0, y2 - y1)
+            area = width * height
+            aspect = max(width / max(height, 1.0), height / max(width, 1.0))
+            center = (x1 + width / 2, y1 + height / 2)
+            if area > 250_000:
+                issues.append(f"root bbox area {round(area)} is unusually large")
+            if aspect > 12:
+                issues.append(f"root bbox aspect {round(aspect, 1)} is unusually thin")
+            for region in record.get("linked_regions") or []:
+                if not isinstance(region, dict):
+                    continue
+                region_bbox = region.get("bbox")
+                if not isinstance(region_bbox, list) or len(region_bbox) != 4:
+                    continue
+                rx1, ry1, rx2, ry2 = [float(value or 0) for value in region_bbox]
+                region_center = (rx1 + (rx2 - rx1) / 2, ry1 + (ry2 - ry1) / 2)
+                distance = (
+                    (center[0] - region_center[0]) ** 2
+                    + (center[1] - region_center[1]) ** 2
+                ) ** 0.5
+                role = str(region.get("role") or "linked_region")
+                limit = 450 if role == "component_label" else 700
+                if distance > limit:
+                    issues.append(
+                        f"{role} bbox is {round(distance)} px from component center"
+                    )
+        else:
+            issues.append("root bbox is missing or invalid")
+
+        if issues:
+            blockers.append(
+                {
+                    "annotation_id": record.get("id"),
+                    "page_num": row.get("page_num"),
+                    "class": record.get("class"),
+                    "schematic_class": record.get("schematic_class"),
+                    "component_label": record.get("component_label"),
+                    "component_part_number": record.get("component_part_number"),
+                    "bbox": record.get("bbox"),
+                    "issues": issues,
+                }
+            )
+
+    return {
+        "annotation_count": len(rows),
+        "training_record_count": len(training_records),
+        "class_counts": class_counts,
+        "blocker_count": len(blockers),
+        "blockers": blockers[:50],
+        "thresholds": {
+            "max_root_bbox_area_px": 250_000,
+            "max_root_bbox_aspect": 12,
+            "max_label_distance_px": 450,
+            "max_attachment_distance_px": 700,
+        },
+    }
+
+
+async def _insert_vision_training_run(
+    project: dict[str, object],
+    document_id: str,
+    body: WorkbenchVisionTrainingLaunch,
+    *,
+    trainer: str,
+    display_name: str,
+) -> uuid.UUID:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        row = await conn.execute(
+            """
+            INSERT INTO vision_training_runs (
+                project_id, document_id, trainer, model_id, dataset_kind,
+                annotation_mode, class_filter, status, phase, display_name,
+                region, runtime_template, gcs_bucket, gcs_prefix,
+                user_email, service_account, metadata
+            )
+            VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, 'created', 'created', %s,
+                %s, %s, %s, %s,
+                %s, %s, %s::jsonb
+            )
+            RETURNING training_run_id
+            """,
+            (
+                uuid.UUID(_project_id(project)),
+                document_id,
+                trainer,
+                body.modelId,
+                body.datasetKind,
+                body.annotationMode,
+                body.classes,
+                display_name,
+                body.region,
+                body.runtimeTemplate,
+                body.gcsBucket,
+                body.gcsPrefix,
+                body.userEmail or None,
+                body.serviceAccount or None,
+                json.dumps({
+                    "launcher": "colab_enterprise",
+                    "launchMode": body.launchMode,
+                    "executionSkipped": body.launchMode not in {"execute", "eval_run", "gpu_smoke"},
+                }),
+            ),
+        )
+        result = await row.fetchone()
+        await conn.commit()
+    return result[0]
+
+
+async def _update_vision_training_run(
+    training_run_id: uuid.UUID,
+    **fields: object,
+) -> None:
+    allowed = {
+        "status",
+        "phase",
+        "dataset_uri",
+        "notebook_uri",
+        "output_uri",
+        "execution_name",
+        "execution_id",
+        "stdout",
+        "stderr",
+        "error_message",
+        "metadata",
+        "execution_payload",
+    }
+    updates = []
+    values: list[object] = []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        if key in {"metadata", "execution_payload"}:
+            updates.append(f"{key} = %s::jsonb")
+            values.append(json.dumps(value or {}))
+        else:
+            updates.append(f"{key} = %s")
+            values.append(value)
+    if not updates:
+        return
+    updates.append("updated_at = now()")
+    values.append(training_run_id)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            f"UPDATE vision_training_runs SET {', '.join(updates)} WHERE training_run_id = %s",
+            values,
+        )
+        await conn.commit()
+
+
+async def _list_vision_training_runs(
+    project: dict[str, object],
+    document_id: str,
+) -> list[dict[str, object]]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            """
+            SELECT
+                training_run_id, project_id, document_id, trainer, model_id,
+                dataset_kind, annotation_mode, class_filter, status, phase,
+                display_name, region, runtime_template, gcs_bucket, gcs_prefix,
+                dataset_uri, notebook_uri, output_uri, execution_name,
+                execution_id, user_email, service_account, stdout, stderr,
+                error_message, metadata, execution_payload, created_at, updated_at
+            FROM vision_training_runs
+            WHERE project_id = %s AND document_id = %s
+            ORDER BY created_at DESC
+            LIMIT 25
+            """,
+            (uuid.UUID(_project_id(project)), document_id),
+        )
+        results = await rows.fetchall()
+    return [_vision_training_run_row(row) for row in results]
+
+
+async def _active_vision_training_run(
+    project: dict[str, object],
+    document_id: str,
+) -> dict[str, object] | None:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            """
+            SELECT
+                training_run_id, project_id, document_id, trainer, model_id,
+                dataset_kind, annotation_mode, class_filter, status, phase,
+                display_name, region, runtime_template, gcs_bucket, gcs_prefix,
+                dataset_uri, notebook_uri, output_uri, execution_name,
+                execution_id, user_email, service_account, stdout, stderr,
+                error_message, metadata, execution_payload, created_at, updated_at
+            FROM vision_training_runs
+            WHERE project_id = %s
+              AND document_id = %s
+              AND status IN ('created', 'staging', 'submitted', 'running')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (uuid.UUID(_project_id(project)), document_id),
+        )
+        row = await rows.fetchone()
+    return _vision_training_run_row(row) if row else None
+
+
+async def _get_vision_training_run(
+    project: dict[str, object],
+    document_id: str,
+    training_run_id: uuid.UUID,
+) -> dict[str, object]:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            """
+            SELECT
+                training_run_id, project_id, document_id, trainer, model_id,
+                dataset_kind, annotation_mode, class_filter, status, phase,
+                display_name, region, runtime_template, gcs_bucket, gcs_prefix,
+                dataset_uri, notebook_uri, output_uri, execution_name,
+                execution_id, user_email, service_account, stdout, stderr,
+                error_message, metadata, execution_payload, created_at, updated_at
+            FROM vision_training_runs
+            WHERE project_id = %s AND document_id = %s AND training_run_id = %s
+            """,
+            (uuid.UUID(_project_id(project)), document_id, training_run_id),
+        )
+        row = await rows.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="training run not found")
+    return _vision_training_run_row(row)
+
+
+async def _refresh_vision_training_run_status(
+    project: dict[str, object],
+    document_id: str,
+    run: dict[str, object],
+) -> dict[str, object]:
+    execution_name = _clean_text(run.get("execution_name"))
+    region = _clean_text(run.get("region")) or _COLAB_ENTERPRISE_REGION
+    if not execution_name:
+        return run
+    command = [
+        "gcloud",
+        "colab",
+        "executions",
+        "describe",
+        execution_name,
+        f"--region={region}",
+        "--format=json",
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run,
+        command,
+        cwd=str(_REPO_ROOT),
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return run
+    payload = _parse_last_json_object(result.stdout)
+    state = _clean_text(payload.get("state") if isinstance(payload, dict) else "")
+    status = _colab_state_to_status(state) if state else _clean_text(run.get("status"))
+    phase = f"colab_{status}" if status else _clean_text(run.get("phase"))
+    await _update_vision_training_run(
+        uuid.UUID(str(run["training_run_id"])),
+        status=status,
+        phase=phase,
+        execution_payload=payload if isinstance(payload, dict) else {},
+    )
+    return await _get_vision_training_run(project, document_id, uuid.UUID(str(run["training_run_id"])))
+
+
+def _vision_training_run_row(row: Any) -> dict[str, object]:
+    return {
+        "training_run_id": str(row[0]),
+        "project_id": str(row[1]),
+        "document_id": row[2],
+        "trainer": row[3],
+        "model_id": row[4],
+        "dataset_kind": row[5],
+        "annotation_mode": row[6],
+        "class_filter": row[7],
+        "status": row[8],
+        "phase": row[9],
+        "display_name": row[10],
+        "region": row[11],
+        "runtime_template": row[12],
+        "gcs_bucket": row[13],
+        "gcs_prefix": row[14],
+        "dataset_uri": row[15],
+        "notebook_uri": row[16],
+        "output_uri": row[17],
+        "execution_name": row[18],
+        "execution_id": row[19],
+        "user_email": row[20],
+        "service_account": row[21],
+        "stdout": row[22],
+        "stderr": row[23],
+        "error_message": row[24],
+        "metadata": row[25] or {},
+        "execution_payload": row[26] or {},
+        "created_at": row[27].isoformat() if hasattr(row[27], "isoformat") else row[27],
+        "updated_at": row[28].isoformat() if hasattr(row[28], "isoformat") else row[28],
+    }
+
+
+def _normalize_training_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "", str(value or "").strip().lower())
+
+
+def _parse_colab_launcher_payload(stdout: str) -> dict[str, object]:
+    match = re.search(r"\{\s*\"display_name\".*?\n\}", stdout, flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        payload = json.loads(match.group(0))
+        return payload if isinstance(payload, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _parse_last_json_object(text: str) -> dict[str, object]:
+    decoder = json.JSONDecoder()
+    payloads: list[dict[str, object]] = []
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    if payloads:
+        return payloads[-1]
+    return {}
+
+
+def _extract_execution_name(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    name = _clean_text(payload.get("name"))
+    if name:
+        return name
+    response = payload.get("response")
+    if isinstance(response, dict):
+        return _clean_text(response.get("name"))
+    return ""
+
+
+def _execution_id_from_name(name: str) -> str:
+    return name.rstrip("/").split("/")[-1] if name else ""
+
+
+def _colab_state_to_status(state: str) -> str:
+    normalized = state.lower()
+    if "succeed" in normalized or "complete" in normalized:
+        return "succeeded"
+    if "fail" in normalized or "error" in normalized or "cancel" in normalized:
+        return "failed"
+    if "run" in normalized or "pending" in normalized or "queue" in normalized:
+        return "running"
+    return normalized or "submitted"
+
+
+async def _load_component_dataset_rows(
+    project: dict[str, object],
+    document_id: str,
+    annotation_mode: AnnotationWorkspaceMode,
+) -> list[dict[str, object]]:
+    annotation_table = _annotation_table(annotation_mode)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            f"""
+            SELECT
+                client_annotation_id,
+                page_num,
+                label,
+                bbox,
+                label_bbox,
+                label_candidate_index,
+                label_candidates,
+                metadata
+            FROM {annotation_table}
+            WHERE project_id = %s
+              AND document_id = %s
+              AND COALESCE(metadata ->> 'rootType', annotation_type) = 'component'
+            ORDER BY page_num ASC, created_at ASC, client_annotation_id ASC
+            """,
+            (uuid.UUID(_project_id(project)), document_id),
+        )
+        results = await rows.fetchall()
+    symbol_entries = (await _get_workbench_symbol_bank(project, document_id)).get(
+        "symbols", []
+    )
+    return [
+        {
+            "id": row[0],
+            "page_num": row[1],
+            "label": row[2],
+            "bbox": row[3],
+            "label_bbox": row[4],
+            "label_candidate_index": row[5],
+            "label_candidates": row[6] or [],
+            "metadata": _metadata_with_attachment_identity(
+                row[7] or {},
+                symbol_entries,
+                label=row[2],
+            ),
+        }
+        for row in results
+        if _is_component_training_pair_label(str(row[2] or ""))
+    ]
+
+
+def _qwen_component_record(row: dict[str, object]) -> dict[str, object]:
+    identity = _component_identity_for_annotation(row)
+    schematic_class = _dataset_component_class_name(str(row.get("label") or ""))
+    component_symbol = _component_symbol_for_training_record(row, schematic_class, identity)
+    class_name = (
+        _normalize_dataset_class_name(str(identity.get("description") or ""))
+        if identity
+        else ""
+    ) or schematic_class
+    class_source = "annotation_label"
+    if identity.get("description"):
+        identity_source = str(identity.get("source") or "")
+        if identity_source.startswith("parts_"):
+            class_source = "parts_list_description"
+        elif identity_source == "schematic_context":
+            class_source = "schematic_context"
+        else:
+            class_source = "component_identity"
+    return {
+        "id": str(row["id"]),
+        "class": class_name,
+        "class_source": class_source,
+        "schematic_class": schematic_class,
+        "component_label": schematic_class,
+        "component_symbol": component_symbol or None,
+        "component_description": identity.get("description") or None,
+        "component_part_number": identity.get("part_number") or None,
+        "component_context_text": _component_context_text_for_annotation(row) or None,
+        "component_location": identity.get("location") or None,
+        "parts_source_page": identity.get("source_page") or None,
+        "bbox": _bbox_array(row.get("bbox")),
+        "normalized_bbox": _normalized_bbox(row.get("bbox")),
+        "linked_regions": _linked_regions_for_annotation(row, class_name, schematic_class),
+    }
+
+
+def _component_symbol_for_training_record(
+    row: dict[str, object],
+    schematic_class: str,
+    identity: dict[str, str],
+) -> str:
+    for value in (identity.get("symbol"), row.get("label")):
+        symbol = _leading_symbol_for_class(value, schematic_class)
+        if symbol:
+            return symbol
+    return schematic_class
+
+
+def _leading_symbol_for_class(value: object, schematic_class: str) -> str:
+    normalized = _normalize_symbol(value)
+    if not normalized or schematic_class == "unknown_component":
+        return ""
+    match = re.match(rf"^({re.escape(schematic_class)}\d*)", normalized)
+    return match.group(1) if match else ""
+
+
+def _component_identity_for_annotation(row: dict[str, object]) -> dict[str, str]:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    raw_identity = metadata.get("componentIdentity") if isinstance(metadata, dict) else None
+    if isinstance(raw_identity, dict):
+        symbol = _clean_text(raw_identity.get("full_symbol") or raw_identity.get("symbol"))
+        description = _clean_text(raw_identity.get("description"))
+        part_number = _clean_text(raw_identity.get("part_number") or raw_identity.get("partNumber"))
+        location = _clean_text(raw_identity.get("location"))
+        source_page = _clean_text(raw_identity.get("source_page") or raw_identity.get("sourcePage"))
+        source = _clean_text(raw_identity.get("source"))
+        match_status = _clean_text(raw_identity.get("match_status") or raw_identity.get("matchStatus"))
+        if symbol or description or part_number:
+            return {
+                "symbol": symbol,
+                "description": description,
+                "part_number": part_number,
+                "location": location,
+                "source_page": source_page,
+                "source": source,
+                "match_status": match_status,
+            }
+
+    candidates = row.get("label_candidates")
+    if not isinstance(candidates, list):
+        return {}
+    index = row.get("label_candidate_index")
+    ordered_candidates = []
+    if isinstance(index, int) and 0 <= index < len(candidates):
+        ordered_candidates.append(candidates[index])
+    ordered_candidates.extend(candidates)
+    for candidate in ordered_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        symbol = candidate.get("symbol")
+        if isinstance(symbol, dict) and _symbol_candidate_matches_annotation(row, candidate):
+            return {
+                "symbol": _clean_text(symbol.get("symbol")),
+                "description": _clean_text(symbol.get("description")),
+                "part_number": _clean_text(symbol.get("part_number")),
+                "location": _clean_text(symbol.get("location")),
+                "source_page": _clean_text(symbol.get("source_page")),
+                "source": "parts_symbol_match",
+                "match_status": "symbol_match",
+            }
+    return {}
+
+
+def _symbol_candidate_matches_annotation(
+    row: dict[str, object],
+    candidate: dict[str, object],
+) -> bool:
+    symbol = candidate.get("symbol")
+    if not isinstance(symbol, dict):
+        return False
+    component_family = _dataset_component_class_name(str(row.get("label") or ""))
+    candidate_family = _dataset_component_class_name(
+        str(candidate.get("normalizedText") or candidate.get("text") or "")
+    )
+    symbol_family = _dataset_component_class_name(str(symbol.get("symbol") or ""))
+    if component_family != "unknown_component" and component_family in {
+        candidate_family,
+        symbol_family,
+    }:
+        return True
+
+    symbol_text = _normalize_symbol(symbol.get("symbol"))
+    part_number = _normalize_part_number(symbol.get("part_number"))
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    attachments = metadata.get("attachments") if isinstance(metadata, dict) else []
+    if not isinstance(attachments, list):
+        return False
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        attachment_text = attachment.get("text")
+        if symbol_text and _normalize_symbol(attachment_text) == symbol_text:
+            return True
+        if part_number and _normalize_part_number(attachment_text) == part_number:
+            return True
+    return False
+
+
+def _linked_regions_for_annotation(
+    row: dict[str, object],
+    class_name: str,
+    schematic_class: str,
+) -> list[dict[str, object]]:
+    regions: list[dict[str, object]] = []
+    label_bbox = row.get("label_bbox")
+    if label_bbox:
+        regions.append(
+            _linked_region(
+                f"{row['id']}.label",
+                "component_label",
+                f"{schematic_class}_label",
+                label_bbox,
+                schematic_class,
+            )
+        )
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    attachments = metadata.get("attachments") if isinstance(metadata, dict) else []
+    if not isinstance(attachments, list):
+        return regions
+    for index, attachment in enumerate(attachments, start=1):
+        if not isinstance(attachment, dict) or not attachment.get("bbox"):
+            continue
+        role = str(attachment.get("type") or "attachment")
+        fallback_class = _dataset_attachment_class_name(
+            role,
+            str(attachment.get("text") or ""),
+            str(row.get("label") or ""),
+        )
+        linked_class = (
+            f"{class_name}_part_number"
+            if role == "part_number"
+            else f"{class_name}_spec"
+            if role == "spec"
+            else fallback_class
+        )
+        regions.append(
+            _linked_region(
+                f"{row['id']}.{index}",
+                role,
+                linked_class,
+                attachment.get("bbox"),
+                str(attachment.get("text") or ""),
+            )
+        )
+    return regions
+
+
+def _component_context_text_for_annotation(row: dict[str, object]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    attachments = metadata.get("attachments") if isinstance(metadata, dict) else []
+    if not isinstance(attachments, list):
+        return ""
+    texts: list[str] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        if str(attachment.get("type") or "") != "text":
+            continue
+        text = _clean_text(attachment.get("text"))
+        if text:
+            texts.append(text)
+    return " ".join(texts)
+
+
+def _linked_region(
+    region_id: str,
+    role: str,
+    class_name: str,
+    bbox: object,
+    text: str,
+) -> dict[str, object]:
+    region = {
+        "id": region_id,
+        "role": role,
+        "class": class_name,
+        "bbox": _bbox_array(bbox),
+        "normalized_bbox": _normalized_bbox(bbox),
+    }
+    if text:
+        region["text"] = text
+    return region
+
+
+def _parse_dataset_class_filter(classes: str | None) -> set[str]:
+    if not classes:
+        return set()
+    return {
+        _normalize_dataset_class_name(value)
+        for value in re.split(r"[,;\n]", classes)
+        if _normalize_dataset_class_name(value)
+    }
+
+
+def _record_matches_class_filter(
+    record: dict[str, object],
+    selected_classes: set[str],
+) -> bool:
+    return any(
+        _normalize_dataset_class_name(str(record.get(key) or "")) in selected_classes
+        for key in ("class", "schematic_class", "component_description")
+    )
+
+
+def _canonicalize_training_record_classes(records: list[dict[str, object]]) -> None:
+    preferred_by_schematic: dict[str, str] = {}
+    for record in records:
+        schematic_class = _normalize_dataset_class_name(
+            str(record.get("schematic_class") or "")
+        )
+        class_name = _normalize_dataset_class_name(str(record.get("class") or ""))
+        class_source = str(record.get("class_source") or "")
+        if (
+            not schematic_class
+            or not class_name
+            or class_name == schematic_class
+            or class_source == "annotation_label"
+        ):
+            continue
+        preferred_by_schematic.setdefault(schematic_class, class_name)
+
+    for record in records:
+        schematic_class = _normalize_dataset_class_name(
+            str(record.get("schematic_class") or "")
+        )
+        preferred_class = preferred_by_schematic.get(schematic_class)
+        if not preferred_class:
+            continue
+        current_class = _normalize_dataset_class_name(str(record.get("class") or ""))
+        if current_class == preferred_class:
+            continue
+        record["class"] = preferred_class
+        record["class_source"] = "schematic_family_canonicalized"
+
+
+_STANDALONE_DATASET_ROOT_LABELS = {
+    "CONTINUATION",
+    "INPUTSIGNALWIRE",
+    "OUTPUTSIGNALWIRE",
+    "SHIELDEDCABLE",
+    "TERMINAL",
+    "WIRELABEL",
+    "5VWIRELABEL",
+    "-5VWIRELABEL",
+    "24VWIRELABEL",
+    "-24VWIRELABEL",
+    "NC24VWIRELABEL",
+}
+
+_KNOWN_COMPONENT_CLASS_FAMILIES = {
+    "AIR",
+    "AMP",
+    "BRAKE",
+    "CAB",
+    "CN",
+    "CNV",
+    "CON",
+    "CONNECTOR",
+    "CP",
+    "CR",
+    "CRF",
+    "CRG",
+    "CT",
+    "DBU",
+    "DS",
+    "ELB",
+    "ELR",
+    "F",
+    "G",
+    "INV",
+    "KS",
+    "LED",
+    "LNF",
+    "LS",
+    "LSSD",
+    "M",
+    "MC",
+    "MCB",
+    "MCC",
+    "MCDDV",
+    "MCDDVM",
+    "MCICV",
+    "MCICVM",
+    "MMS",
+    "MODULE",
+    "MOTORBOX",
+    "MS",
+    "OSH",
+    "PB",
+    "PBES",
+    "PBL",
+    "PC",
+    "PE",
+    "PL",
+    "PN",
+    "PP",
+    "R",
+    "REC",
+    "RTC",
+    "SK",
+    "SP",
+    "SPRAY",
+    "SR",
+    "SRU",
+    "SZ",
+    "SZZ",
+    "T",
+    "TAKEOUT",
+    "TB",
+    "TB30",
+    "THR",
+    "TR",
+    "WHM",
+    "ZCT",
+}
+
+
+def _is_component_training_pair_label(label: str) -> bool:
+    return _normalize_symbol(label) not in _STANDALONE_DATASET_ROOT_LABELS
+
+
+def _normalize_dataset_class_name(value: str) -> str:
+    text = value.strip().upper().replace("&", " AND ")
+    text = re.sub(r"[^A-Z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def _normalize_part_number(value: object) -> str:
+    return re.sub(
+        r"[^A-Z0-9]",
+        "",
+        unicodedata.normalize("NFKC", str(value or "")).upper(),
+    )
+
+
+def _bbox_array(box: object) -> list[int]:
+    if not isinstance(box, dict):
+        return [0, 0, 0, 0]
+    x1 = round(float(box.get("x") or 0))
+    y1 = round(float(box.get("y") or 0))
+    x2 = round(float(box.get("x") or 0) + float(box.get("width") or 0))
+    y2 = round(float(box.get("y") or 0) + float(box.get("height") or 0))
+    return [x1, y1, x2, y2]
+
+
+def _normalized_bbox(box: object) -> dict[str, float]:
+    x1, y1, x2, y2 = _bbox_array(box)
+    return {
+        "x_min": _normalize_coordinate(x1, _PAGE_WIDTH_PX),
+        "y_min": _normalize_coordinate(y1, _PAGE_HEIGHT_PX),
+        "x_max": _normalize_coordinate(x2, _PAGE_WIDTH_PX),
+        "y_max": _normalize_coordinate(y2, _PAGE_HEIGHT_PX),
+    }
+
+
+def _normalize_coordinate(value: int, size: int) -> float:
+    return max(0, min(1, round(value / size, 6)))
+
+
+def _qwen_dataset_readme() -> str:
+    return """# Atlas Qwen3-VL schematic grounding dataset
+
+This bundle is generated from accepted Extraction Studio training-dataset annotations.
+
+Files:
+- `dataset.jsonl`: one page-level grounding example per schematic page.
+- `images/`: canonical page renders in the same coordinate space as bboxes.
+- `sweep_images/`: page renders for eval-run proposal sweeps; these are not training truth unless annotated.
+- `manifest.json`: bundle metadata and counts.
+- `qwen3vl_colab_starter.ipynb`: Colab notebook shell for GPU Qwen3-VL LoRA fine-tuning.
+
+Class policy:
+- `class` prefers the parts-list component description, normalized for training.
+- `schematic_class` preserves the original schematic label family such as `ELB` or `MC`.
+- `component_context_text` preserves contextual text such as `SERVO MOTOR`.
+- `linked_regions` preserve component label, part number, spec, terminal, and context-text regions.
+
+Qwen3-VL source:
+- The notebook clones `https://github.com/QwenLM/Qwen3-VL` directly in Colab.
+- The dataset archive intentionally contains Atlas training data only, not local model
+  weights, local PDFs, caches, virtualenvs, or machine-specific Qwen artifacts.
+"""
+
+
+def _qwen_colab_notebook() -> str:
+    install_cell = """!test -d /content/Qwen3-VL/.git || git clone --depth 1 https://github.com/QwenLM/Qwen3-VL /content/Qwen3-VL
+!pip install -U -q "git+https://github.com/huggingface/transformers.git@7aa888b7fa477d13153ffbfe107dfbd6c696014a" accelerate peft bitsandbytes datasets "pillow<12.0,>=11.0" qwen-vl-utils trl
+"""
+    setup_cell = """from pathlib import Path
+import json, os, subprocess, zipfile
+from google.colab import files
+
+PROJECT_ROOT = Path("/content/atlas-qwen3vl")
+QWEN3VL_REPO_ROOT = Path("/content/Qwen3-VL")
+PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+DATASET_ROOT = PROJECT_ROOT / "dataset"
+OUTPUT_DIR = PROJECT_ROOT / "outputs" / "qwen3vl-schematic-lora"
+GCS_OUTPUT_URI = os.getenv("ATLAS_GCS_OUTPUT_URI", "").rstrip("/")
+GCS_CHECKPOINT_URI = f"{GCS_OUTPUT_URI}/checkpoints" if GCS_OUTPUT_URI else ""
+
+# Upload atlas-qwen3vl-colab-dataset.zip from Extraction Studio.
+uploaded = files.upload()
+zip_name = next(name for name in uploaded if name.endswith(".zip"))
+with zipfile.ZipFile(zip_name) as archive:
+    archive.extractall(DATASET_ROOT)
+
+manifest = json.loads((DATASET_ROOT / "manifest.json").read_text())
+rows = [
+    json.loads(line)
+    for line in (DATASET_ROOT / "dataset.jsonl").read_text().splitlines()
+    if line.strip()
+]
+sweep_pages = manifest.get("sweep_pages", [])
+print(manifest)
+print("rows", len(rows), "annotations", sum(len(row["annotations"]) for row in rows))
+print("sweep pages", len(sweep_pages))
+"""
+    runtime_cell = """import os, subprocess, sys, torch
+
+if not QWEN3VL_REPO_ROOT.exists():
+    raise RuntimeError("Qwen3-VL GitHub source was not cloned into /content/Qwen3-VL")
+
+REQUIRE_GPU = os.getenv("ATLAS_REQUIRE_GPU", "1") == "1"
+INSTALL_FLASH_ATTN = os.getenv("ATLAS_INSTALL_FLASH_ATTN", "0") == "1"
+USE_FLASH_ATTENTION = os.getenv("ATLAS_QWEN3VL_ATTENTION", "sdpa") == "flash_attention_2"
+
+if REQUIRE_GPU and not torch.cuda.is_available():
+    raise RuntimeError("CUDA GPU is required for this Qwen3-VL training run, but torch.cuda.is_available() is false.")
+
+if torch.cuda.is_available():
+    print("cuda devices", torch.cuda.device_count())
+    for idx in range(torch.cuda.device_count()):
+        print(idx, torch.cuda.get_device_name(idx))
+else:
+    print("cuda unavailable; running only because ATLAS_REQUIRE_GPU=0")
+
+if INSTALL_FLASH_ATTN:
+    if not torch.cuda.is_available():
+        raise RuntimeError("ATLAS_INSTALL_FLASH_ATTN=1 requires a CUDA runtime.")
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "flash-attn", "--no-build-isolation"],
+        check=True,
+    )
+
+print("Qwen3-VL repo", QWEN3VL_REPO_ROOT)
+print("flash_attention_2", USE_FLASH_ATTENTION)
+"""
+    model_config_cell = """# Colab Pro+ high-memory target.
+# Qwen3-VL 32B dense is the default detector target. The app may pass any supported model ID.
+MODEL_ID = os.getenv("ATLAS_QWEN3VL_MODEL", "Qwen/Qwen3-VL-32B-Instruct")
+USE_4BIT = True
+MAX_STEPS = int(os.getenv("ATLAS_MAX_STEPS", "80"))
+LEARNING_RATE = 2e-4
+PER_DEVICE_BATCH = 1
+GRAD_ACCUM = 8
+EVAL_STEPS = int(os.getenv("ATLAS_EVAL_STEPS", "10"))
+SAVE_STEPS = EVAL_STEPS
+SAVE_TOTAL_LIMIT = int(os.getenv("ATLAS_SAVE_TOTAL_LIMIT", "4"))
+EARLY_STOPPING_PATIENCE = int(os.getenv("ATLAS_EARLY_STOPPING_PATIENCE", "4"))
+VALIDATION_RATIO = float(os.getenv("ATLAS_VALIDATION_RATIO", "0.2"))
+RESUME_FROM_CHECKPOINT = os.getenv("ATLAS_RESUME_FROM_CHECKPOINT", "1") == "1"
+SWEEP_MAX_PAGES = int(os.getenv("ATLAS_SWEEP_MAX_PAGES", "129"))
+EVAL_MAX_NEW_TOKENS = int(os.getenv("ATLAS_EVAL_MAX_NEW_TOKENS", "256"))
+SWEEP_MAX_NEW_TOKENS = int(os.getenv("ATLAS_SWEEP_MAX_NEW_TOKENS", str(EVAL_MAX_NEW_TOKENS)))
+print("MODEL_ID", MODEL_ID)
+print("MAX_STEPS", MAX_STEPS, "EVAL_STEPS", EVAL_STEPS, "SAVE_STEPS", SAVE_STEPS)
+print("SWEEP_MAX_PAGES", SWEEP_MAX_PAGES)
+print("EVAL_MAX_NEW_TOKENS", EVAL_MAX_NEW_TOKENS, "SWEEP_MAX_NEW_TOKENS", SWEEP_MAX_NEW_TOKENS)
+"""
+    format_cell = """from PIL import Image
+from datasets import Dataset
+
+SYSTEM_PROMPT = (
+    "You are Atlas Extraction Studio's schematic grounding model. "
+    "Detect requested electrical components in the schematic image and return strict JSON only. "
+    "Coordinates are absolute page pixels [x1, y1, x2, y2]."
+)
+
+def target_json(row):
+    return json.dumps(
+        {
+            "page": row["page"],
+            "image_size": row["image_size"],
+            "detections": row["annotations"],
+        },
+        ensure_ascii=False,
+    )
+
+def text_part(text):
+    return {"type": "text", "text": text}
+
+def to_example(row):
+    prompt = (
+        "Detect all annotated schematic components in this page. "
+        "Return JSON with page, image_size, and detections. "
+        "Each detection must include class, schematic_class, component_label, "
+        "component_context_text, bbox, and linked_regions. "
+        "Use component_context_text as supporting context, not as the detector class."
+    )
+    return {
+        "image_path": str(DATASET_ROOT / row["image"]),
+        "messages": [
+            {"role": "system", "content": [text_part(SYSTEM_PROMPT)]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": str(DATASET_ROOT / row["image"])},
+                    text_part(prompt),
+                ],
+            },
+            {"role": "assistant", "content": [text_part(target_json(row))]},
+        ],
+    }
+
+dataset = Dataset.from_list([to_example(row) for row in rows])
+if len(dataset) < 2:
+    raise RuntimeError("At least 2 page-level examples are required for a train/validation split.")
+split = dataset.train_test_split(test_size=VALIDATION_RATIO, seed=42)
+train_dataset = split["train"]
+eval_dataset = split["test"]
+if len(eval_dataset) == 0:
+    raise RuntimeError("Validation split is empty; add more annotated pages or lower ATLAS_VALIDATION_RATIO.")
+print("train rows", len(train_dataset), "validation rows", len(eval_dataset))
+split
+"""
+    train_cell = """import torch
+from transformers import (
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    BitsAndBytesConfig,
+    EarlyStoppingCallback,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
+from transformers.trainer_utils import get_last_checkpoint
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from qwen_vl_utils import process_vision_info
+
+def load_model(model_id):
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    ) if USE_4BIT else None
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    model_kwargs = {
+        "quantization_config": quantization_config,
+        "device_map": "auto",
+        "dtype": torch.bfloat16,
+        "trust_remote_code": True,
+    }
+    if USE_FLASH_ATTENTION:
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+    model = AutoModelForImageTextToText.from_pretrained(model_id, **model_kwargs)
+    return model, processor
+
+model, processor = load_model(MODEL_ID)
+
+if USE_4BIT:
+    model = prepare_model_for_kbit_training(model)
+
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+)
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+"""
+    collator_cell = """import gc
+import time
+
+CELL_START_TIME = time.time()
+
+def stage_print(message):
+    elapsed = time.time() - CELL_START_TIME
+    print(f"[atlas {elapsed:8.1f}s] {message}", flush=True)
+
+
+class AtlasProgressCallback(TrainerCallback):
+    def on_train_begin(self, args, state, control, **kwargs):
+        stage_print(f"training start: max_steps={state.max_steps} grad_accum={args.gradient_accumulation_steps}")
+        return control
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        logs = logs or {}
+        shown = {
+            key: logs[key]
+            for key in ("loss", "eval_loss", "learning_rate", "grad_norm", "epoch")
+            if key in logs
+        }
+        if shown:
+            stage_print(f"trainer log step={state.global_step}: {shown}")
+        return control
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        stage_print(f"eval complete step={state.global_step}: {metrics or {}}")
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        stage_print(f"checkpoint saved step={state.global_step}; best={state.best_model_checkpoint}")
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        stage_print(f"training end step={state.global_step}; best={state.best_model_checkpoint}")
+        return control
+
+
+stage_print(
+    f"cell 8 start: train_rows={len(train_dataset)} eval_rows={len(eval_dataset)} "
+    f"max_steps={MAX_STEPS} eval_steps={EVAL_STEPS} save_steps={SAVE_STEPS} "
+    f"eval_tokens={EVAL_MAX_NEW_TOKENS} sweep_tokens={SWEEP_MAX_NEW_TOKENS}"
+)
+
+
+class GcsCheckpointSyncCallback(TrainerCallback):
+    def __init__(self, output_dir, gcs_checkpoint_uri):
+        self.output_dir = Path(output_dir)
+        self.gcs_checkpoint_uri = gcs_checkpoint_uri
+
+    def _sync(self):
+        if not self.gcs_checkpoint_uri:
+            return
+        subprocess.run(
+            ["gcloud", "storage", "rsync", "-r", str(self.output_dir), self.gcs_checkpoint_uri],
+            check=True,
+        )
+
+    def on_save(self, args, state, control, **kwargs):
+        self._sync()
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self._sync()
+        return control
+
+
+def collate_fn(batch):
+    if len(batch) != 1:
+        raise RuntimeError("This notebook expects per-device batch size 1 for full-page Qwen3-VL training.")
+    encoded = encode_item_messages(batch[0], add_generation_prompt=False)
+    labels = encoded["input_ids"].clone()
+    if processor.tokenizer.pad_token_id is not None:
+        labels[labels == processor.tokenizer.pad_token_id] = -100
+    encoded["labels"] = labels
+    return encoded
+
+def _content_to_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if value.get("type") == "text":
+            return str(value.get("text", ""))
+        if "text" in value:
+            return str(value.get("text", ""))
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        parts = []
+        for part in value:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text", "")))
+            elif isinstance(part, str):
+                parts.append(part)
+        if parts:
+            return "\\n".join(parts)
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+def _message_text_content(message):
+    return _content_to_text(message.get("content", ""))
+
+def prompt_messages_for_item(item):
+    source_messages = item["messages"]
+    system_text = _message_text_content(source_messages[0]) if source_messages else SYSTEM_PROMPT
+    user_text = _message_text_content(source_messages[1]) if len(source_messages) > 1 else ""
+    image = Image.open(item["image_path"]).convert("RGB")
+    return [
+        {"role": "system", "content": [{"type": "text", "text": system_text}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+def encode_item_messages(item, add_generation_prompt=False):
+    messages = prompt_messages_for_item(item)
+    text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=add_generation_prompt,
+    )
+    image_inputs, video_inputs = process_vision_info(messages)
+    encoded_kwargs = {
+        "text": [text],
+        "images": image_inputs,
+        "return_tensors": "pt",
+        "padding": True,
+    }
+    if video_inputs:
+        encoded_kwargs["videos"] = video_inputs
+    return processor(**encoded_kwargs)
+
+last_checkpoint = get_last_checkpoint(str(OUTPUT_DIR)) if OUTPUT_DIR.exists() else None
+if RESUME_FROM_CHECKPOINT and GCS_CHECKPOINT_URI and not last_checkpoint:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["gcloud", "storage", "rsync", "-r", GCS_CHECKPOINT_URI, str(OUTPUT_DIR)],
+        check=False,
+    )
+    last_checkpoint = get_last_checkpoint(str(OUTPUT_DIR)) if OUTPUT_DIR.exists() else None
+print("resume checkpoint", last_checkpoint or "none")
+stage_print(f"resume checkpoint {last_checkpoint or 'none'}")
+
+def _bbox_iou(left, right):
+    lx1, ly1, lx2, ly2 = [float(value) for value in left]
+    rx1, ry1, rx2, ry2 = [float(value) for value in right]
+    ix1, iy1 = max(lx1, rx1), max(ly1, ry1)
+    ix2, iy2 = min(lx2, rx2), min(ly2, ry2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    left_area = max(0.0, lx2 - lx1) * max(0.0, ly2 - ly1)
+    right_area = max(0.0, rx2 - rx1) * max(0.0, ry2 - ry1)
+    union = left_area + right_area - inter
+    return inter / union if union else 0.0
+
+def _extract_json(text):
+    text = _content_to_text(text).strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+def _detections_from_payload(payload):
+    if isinstance(payload, dict):
+        detections = payload.get("detections", [])
+        return detections if isinstance(detections, list) else []
+    return payload if isinstance(payload, list) else []
+
+def run_detection_quality_eval(max_examples=4, iou_threshold=0.5):
+    model.eval()
+    rows_out = []
+    totals = {"targets": 0, "predictions": 0, "matches": 0}
+    selected = eval_dataset.select(range(min(max_examples, len(eval_dataset))))
+    stage_print(
+        f"baseline eval: start examples={len(selected)} "
+        f"iou={iou_threshold} max_new_tokens={EVAL_MAX_NEW_TOKENS}"
+    )
+    for example_index, item in enumerate(selected, start=1):
+        target = _extract_json(item["messages"][-1]["content"])
+        target_detections = _detections_from_payload(target)
+        stage_print(f"baseline eval: example {example_index}/{len(selected)} encode start")
+        encoded = encode_item_messages(item, add_generation_prompt=True).to(model.device)
+        stage_print(f"baseline eval: example {example_index}/{len(selected)} generate start")
+        with torch.no_grad():
+            generated = model.generate(**encoded, max_new_tokens=EVAL_MAX_NEW_TOKENS, do_sample=False)
+        stage_print(f"baseline eval: example {example_index}/{len(selected)} generate done")
+        generated_text = processor.batch_decode(
+            generated[:, encoded["input_ids"].shape[1]:],
+            skip_special_tokens=True,
+        )[0]
+        parse_error = ""
+        predicted_detections = []
+        try:
+            predicted_detections = _detections_from_payload(_extract_json(generated_text))
+        except Exception as exc:
+            parse_error = str(exc)
+        used_predictions = set()
+        matches = []
+        for target_index, target_detection in enumerate(target_detections):
+            best = {"prediction_index": None, "iou": 0.0}
+            target_class = str(target_detection.get("class") or "")
+            target_bbox = target_detection.get("bbox") or []
+            for prediction_index, predicted_detection in enumerate(predicted_detections):
+                if prediction_index in used_predictions:
+                    continue
+                if str(predicted_detection.get("class") or "") != target_class:
+                    continue
+                predicted_bbox = predicted_detection.get("bbox") or []
+                if not isinstance(target_bbox, list) or not isinstance(predicted_bbox, list):
+                    continue
+                if len(target_bbox) != 4 or len(predicted_bbox) != 4:
+                    continue
+                iou = _bbox_iou(target_bbox, predicted_bbox)
+                if iou > best["iou"]:
+                    best = {"prediction_index": prediction_index, "iou": iou}
+            if best["prediction_index"] is not None and best["iou"] >= iou_threshold:
+                used_predictions.add(best["prediction_index"])
+                matches.append({"target_index": target_index, **best})
+        totals["targets"] += len(target_detections)
+        totals["predictions"] += len(predicted_detections)
+        totals["matches"] += len(matches)
+        stage_print(
+            f"baseline eval: example {example_index}/{len(selected)} done "
+            f"targets={len(target_detections)} predictions={len(predicted_detections)} "
+            f"matches={len(matches)} parse_error={parse_error or 'none'}"
+        )
+        rows_out.append({
+            "image_path": item["image_path"],
+            "target_count": len(target_detections),
+            "prediction_count": len(predicted_detections),
+            "match_count": len(matches),
+            "matches": matches,
+            "parse_error": parse_error,
+            "generated_text": generated_text[:4000],
+        })
+    precision = totals["matches"] / totals["predictions"] if totals["predictions"] else 0.0
+    recall = totals["matches"] / totals["targets"] if totals["targets"] else 0.0
+    stage_print(
+        f"baseline eval: done precision={precision:.4f} recall={recall:.4f} "
+        f"matches={totals['matches']}/{totals['targets']}"
+    )
+    return {
+        "iou_threshold": iou_threshold,
+        "precision": precision,
+        "recall": recall,
+        "target_count": totals["targets"],
+        "prediction_count": totals["predictions"],
+        "match_count": totals["matches"],
+        "examples": rows_out,
+    }
+
+training_args = TrainingArguments(
+    output_dir=str(OUTPUT_DIR),
+    per_device_train_batch_size=PER_DEVICE_BATCH,
+    per_device_eval_batch_size=1,
+    gradient_accumulation_steps=GRAD_ACCUM,
+    learning_rate=LEARNING_RATE,
+    max_steps=MAX_STEPS,
+    bf16=True,
+    logging_steps=1,
+    eval_strategy="steps",
+    eval_steps=EVAL_STEPS,
+    save_strategy="steps",
+    save_steps=SAVE_STEPS,
+    save_total_limit=SAVE_TOTAL_LIMIT,
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
+    remove_unused_columns=False,
+    report_to="none",
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    data_collator=collate_fn,
+    callbacks=[
+        EarlyStoppingCallback(early_stopping_patience=EARLY_STOPPING_PATIENCE),
+        AtlasProgressCallback(),
+        GcsCheckpointSyncCallback(OUTPUT_DIR, GCS_CHECKPOINT_URI),
+    ],
+)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+stage_print("baseline eval: run start")
+baseline_detection_eval = run_detection_quality_eval()
+(OUTPUT_DIR / "atlas_detection_eval_baseline.json").write_text(
+    json.dumps(baseline_detection_eval, indent=2),
+    encoding="utf-8",
+)
+stage_print("baseline eval: wrote atlas_detection_eval_baseline.json")
+stage_print("trainer.train: start")
+train_result = trainer.train(resume_from_checkpoint=last_checkpoint if RESUME_FROM_CHECKPOINT else None)
+stage_print("trainer.train: done")
+metrics = train_result.metrics
+stage_print("trainer.evaluate: start")
+metrics.update(trainer.evaluate())
+stage_print("trainer.evaluate: done")
+(OUTPUT_DIR / "atlas_training_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+stage_print("saving adapter: start")
+model.save_pretrained(OUTPUT_DIR)
+processor.save_pretrained(OUTPUT_DIR)
+stage_print("saving adapter: done")
+stage_print("freeing trainer state before generative eval")
+try:
+    del trainer
+except NameError:
+    pass
+try:
+    del train_result
+except NameError:
+    pass
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+stage_print("gpu cache cleared before post-train eval")
+
+def _bbox_iou(left, right):
+    lx1, ly1, lx2, ly2 = [float(value) for value in left]
+    rx1, ry1, rx2, ry2 = [float(value) for value in right]
+    ix1, iy1 = max(lx1, rx1), max(ly1, ry1)
+    ix2, iy2 = min(lx2, rx2), min(ly2, ry2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    left_area = max(0.0, lx2 - lx1) * max(0.0, ly2 - ly1)
+    right_area = max(0.0, rx2 - rx1) * max(0.0, ry2 - ry1)
+    union = left_area + right_area - inter
+    return inter / union if union else 0.0
+
+def _extract_json(text):
+    text = _content_to_text(text).strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+def _detections_from_payload(payload):
+    if isinstance(payload, dict):
+        detections = payload.get("detections", [])
+        return detections if isinstance(detections, list) else []
+    return payload if isinstance(payload, list) else []
+
+def run_detection_quality_eval(max_examples=4, iou_threshold=0.5):
+    model.eval()
+    rows_out = []
+    totals = {"targets": 0, "predictions": 0, "matches": 0}
+    selected = eval_dataset.select(range(min(max_examples, len(eval_dataset))))
+    stage_print(
+        f"post-train eval: start examples={len(selected)} "
+        f"iou={iou_threshold} max_new_tokens={EVAL_MAX_NEW_TOKENS}"
+    )
+    for example_index, item in enumerate(selected, start=1):
+        target = _extract_json(item["messages"][-1]["content"])
+        target_detections = _detections_from_payload(target)
+        stage_print(f"post-train eval: example {example_index}/{len(selected)} encode start")
+        encoded = encode_item_messages(item, add_generation_prompt=True).to(model.device)
+        stage_print(f"post-train eval: example {example_index}/{len(selected)} generate start")
+        with torch.no_grad():
+            generated = model.generate(**encoded, max_new_tokens=EVAL_MAX_NEW_TOKENS, do_sample=False)
+        stage_print(f"post-train eval: example {example_index}/{len(selected)} generate done")
+        generated_text = processor.batch_decode(
+            generated[:, encoded["input_ids"].shape[1]:],
+            skip_special_tokens=True,
+        )[0]
+        parse_error = ""
+        predicted_detections = []
+        try:
+            predicted_detections = _detections_from_payload(_extract_json(generated_text))
+        except Exception as exc:
+            parse_error = str(exc)
+        used_predictions = set()
+        matches = []
+        for target_index, target_detection in enumerate(target_detections):
+            best = {"prediction_index": None, "iou": 0.0}
+            target_class = str(target_detection.get("class") or "")
+            target_bbox = target_detection.get("bbox") or []
+            for prediction_index, predicted_detection in enumerate(predicted_detections):
+                if prediction_index in used_predictions:
+                    continue
+                if str(predicted_detection.get("class") or "") != target_class:
+                    continue
+                predicted_bbox = predicted_detection.get("bbox") or []
+                if not isinstance(target_bbox, list) or not isinstance(predicted_bbox, list):
+                    continue
+                if len(target_bbox) != 4 or len(predicted_bbox) != 4:
+                    continue
+                iou = _bbox_iou(target_bbox, predicted_bbox)
+                if iou > best["iou"]:
+                    best = {"prediction_index": prediction_index, "iou": iou}
+            if best["prediction_index"] is not None and best["iou"] >= iou_threshold:
+                used_predictions.add(best["prediction_index"])
+                matches.append({"target_index": target_index, **best})
+        totals["targets"] += len(target_detections)
+        totals["predictions"] += len(predicted_detections)
+        totals["matches"] += len(matches)
+        stage_print(
+            f"post-train eval: example {example_index}/{len(selected)} done "
+            f"targets={len(target_detections)} predictions={len(predicted_detections)} "
+            f"matches={len(matches)} parse_error={parse_error or 'none'}"
+        )
+        rows_out.append({
+            "image_path": item["image_path"],
+            "target_count": len(target_detections),
+            "prediction_count": len(predicted_detections),
+            "match_count": len(matches),
+            "matches": matches,
+            "parse_error": parse_error,
+            "generated_text": generated_text[:4000],
+        })
+    precision = totals["matches"] / totals["predictions"] if totals["predictions"] else 0.0
+    recall = totals["matches"] / totals["targets"] if totals["targets"] else 0.0
+    stage_print(
+        f"post-train eval: done precision={precision:.4f} recall={recall:.4f} "
+        f"matches={totals['matches']}/{totals['targets']}"
+    )
+    return {
+        "iou_threshold": iou_threshold,
+        "precision": precision,
+        "recall": recall,
+        "target_count": totals["targets"],
+        "prediction_count": totals["predictions"],
+        "match_count": totals["matches"],
+        "examples": rows_out,
+    }
+
+stage_print("post-train eval: run start")
+detection_eval = run_detection_quality_eval()
+(OUTPUT_DIR / "atlas_detection_eval.json").write_text(
+    json.dumps(detection_eval, indent=2),
+    encoding="utf-8",
+)
+stage_print("post-train eval: wrote atlas_detection_eval.json")
+evaluation_comparison = {
+    "baseline": {
+        "precision": baseline_detection_eval["precision"],
+        "recall": baseline_detection_eval["recall"],
+        "match_count": baseline_detection_eval["match_count"],
+        "target_count": baseline_detection_eval["target_count"],
+        "prediction_count": baseline_detection_eval["prediction_count"],
+    },
+    "trained": {
+        "precision": detection_eval["precision"],
+        "recall": detection_eval["recall"],
+        "match_count": detection_eval["match_count"],
+        "target_count": detection_eval["target_count"],
+        "prediction_count": detection_eval["prediction_count"],
+    },
+    "delta": {
+        "precision": detection_eval["precision"] - baseline_detection_eval["precision"],
+        "recall": detection_eval["recall"] - baseline_detection_eval["recall"],
+        "matches": detection_eval["match_count"] - baseline_detection_eval["match_count"],
+    },
+}
+(OUTPUT_DIR / "atlas_detection_eval_comparison.json").write_text(
+    json.dumps(evaluation_comparison, indent=2),
+    encoding="utf-8",
+)
+
+def run_page_detection_sweep(max_pages=SWEEP_MAX_PAGES):
+    model.eval()
+    target_classes = manifest.get("class_filter") or []
+    class_text = ", ".join(target_classes) if target_classes else "the trained component classes"
+    outputs = []
+    selected_pages = sweep_pages[:max_pages]
+    stage_print(
+        f"sweep: start pages={len(selected_pages)} max_new_tokens={SWEEP_MAX_NEW_TOKENS}"
+    )
+    for sweep_index, page in enumerate(selected_pages, start=1):
+        image_path = DATASET_ROOT / page["image"]
+        stage_print(f"sweep: page {sweep_index}/{len(selected_pages)} p{page.get('page')} encode start")
+        prompt = (
+            f"Detect all schematic components belonging to these trained classes: {class_text}. "
+            "Return strict JSON with page, image_size, and detections. "
+            "Each detection must include class, schematic_class if readable, component_label if readable, "
+            "bbox as [x1,y1,x2,y2] absolute page pixels, and confidence from 0 to 1. "
+            "Return an empty detections list if none are present."
+        )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": Image.open(image_path).convert("RGB")},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ]
+        text = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        encoded_kwargs = {
+            "text": [text],
+            "images": image_inputs,
+            "return_tensors": "pt",
+            "padding": True,
+        }
+        if video_inputs:
+            encoded_kwargs["videos"] = video_inputs
+        encoded = processor(**encoded_kwargs).to(model.device)
+        stage_print(f"sweep: page {sweep_index}/{len(selected_pages)} p{page.get('page')} generate start")
+        with torch.no_grad():
+            generated = model.generate(**encoded, max_new_tokens=SWEEP_MAX_NEW_TOKENS, do_sample=False)
+        stage_print(f"sweep: page {sweep_index}/{len(selected_pages)} p{page.get('page')} generate done")
+        generated_text = processor.batch_decode(
+            generated[:, encoded["input_ids"].shape[1]:],
+            skip_special_tokens=True,
+        )[0]
+        parse_error = ""
+        detections = []
+        try:
+            detections = _detections_from_payload(_extract_json(generated_text))
+        except Exception as exc:
+            parse_error = str(exc)
+        outputs.append({
+            "page": page["page"],
+            "image": page["image"],
+            "detections": detections,
+            "prediction_count": len(detections),
+            "parse_error": parse_error,
+            "generated_text": generated_text[:4000],
+        })
+        stage_print(
+            f"sweep: page {sweep_index}/{len(selected_pages)} p{page.get('page')} done "
+            f"predictions={len(detections)} parse_error={parse_error or 'none'}"
+        )
+    return {
+        "target_classes": target_classes,
+        "page_count": len(outputs),
+        "pages": outputs,
+    }
+
+stage_print("sweep: run start")
+sweep_results = run_page_detection_sweep()
+stage_print("sweep: run done")
+(OUTPUT_DIR / "atlas_eval_run_page_detections.json").write_text(
+    json.dumps(sweep_results, indent=2),
+    encoding="utf-8",
+)
+if GCS_OUTPUT_URI:
+    stage_print(f"final gcs sync start: {GCS_OUTPUT_URI}")
+    subprocess.run(["gcloud", "storage", "rsync", "-r", str(OUTPUT_DIR), GCS_OUTPUT_URI], check=True)
+    stage_print("final gcs sync done")
+stage_print(f"saved {OUTPUT_DIR}")
+print("saved", OUTPUT_DIR)
+print(json.dumps(metrics, indent=2))
+print(json.dumps(evaluation_comparison, indent=2))
+print(json.dumps({"sweep_page_count": sweep_results["page_count"]}, indent=2))
+print(json.dumps(detection_eval, indent=2))
+"""
+    pack_cell = """import shutil
+adapter_zip = shutil.make_archive(str(OUTPUT_DIR), "zip", OUTPUT_DIR)
+files.download(adapter_zip)
+"""
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [
+                    "# Atlas Qwen3-VL schematic grounding LoRA\n",
+                    "This notebook fine-tunes Qwen3-VL on an Extraction Studio object-detection grounding dataset zip.\n",
+                    "It clones QwenLM/Qwen3-VL from GitHub and expects a GPU Colab Enterprise runtime.\n",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": install_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": setup_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": runtime_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": model_config_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": format_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": train_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": collator_cell.splitlines(True),
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": pack_cell.splitlines(True),
+            },
+        ],
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {"name": "python", "pygments_lexer": "ipython3"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    return json.dumps(notebook, indent=2)
+
+
+def _qwen_colab_pro_plus_notebook(
+    *,
+    drive_folder: str,
+    export_name: str,
+    model_id: str,
+) -> str:
+    drive_folder = _normalize_qwen_drive_folder(drive_folder)
+    export_name = _qwen_drive_export_name(export_name)
+    notebook = json.loads(_qwen_colab_notebook())
+    setup_cell = f"""from pathlib import Path
+import json, os, subprocess, zipfile
+from google.colab import drive
+
+drive.mount("/content/drive")
+
+DRIVE_EXPORT_ROOT = Path("/content/drive/MyDrive/{drive_folder}/{export_name}")
+PROJECT_ROOT = Path("/content/atlas-qwen3vl")
+QWEN3VL_REPO_ROOT = Path("/content/Qwen3-VL")
+PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+DATASET_ROOT = DRIVE_EXPORT_ROOT / "dataset"
+OUTPUT_DIR = DRIVE_EXPORT_ROOT / "outputs" / "qwen3vl-schematic-lora"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+GCS_OUTPUT_URI = os.getenv("ATLAS_GCS_OUTPUT_URI", "").rstrip("/")
+GCS_CHECKPOINT_URI = f"{{GCS_OUTPUT_URI}}/checkpoints" if GCS_OUTPUT_URI else ""
+
+if not DATASET_ROOT.exists():
+    zip_path = DRIVE_EXPORT_ROOT / "atlas-qwen3vl-colab-dataset.zip"
+    if not zip_path.exists():
+        raise FileNotFoundError(f"Missing Drive dataset folder and zip: {{DATASET_ROOT}} / {{zip_path}}")
+    DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as archive:
+        archive.extractall(DATASET_ROOT)
+
+manifest = json.loads((DATASET_ROOT / "manifest.json").read_text())
+rows = [
+    json.loads(line)
+    for line in (DATASET_ROOT / "dataset.jsonl").read_text().splitlines()
+    if line.strip()
+]
+sweep_pages = manifest.get("sweep_pages", [])
+print("Drive export root", DRIVE_EXPORT_ROOT)
+print(manifest)
+print("rows", len(rows), "annotations", sum(len(row["annotations"]) for row in rows))
+print("sweep pages", len(sweep_pages))
+"""
+    model_line = f'MODEL_ID = os.getenv("ATLAS_QWEN3VL_MODEL", "{model_id}")\n'
+    for cell in notebook.get("cells", []):
+        source = "".join(cell.get("source", []))
+        if "from google.colab import files" in source and "files.upload()" in source:
+            cell["source"] = setup_cell.splitlines(True)
+        elif 'MODEL_ID = os.getenv("ATLAS_QWEN3VL_MODEL"' in source:
+            cell["source"] = [
+                model_line if line.startswith('MODEL_ID = os.getenv("ATLAS_QWEN3VL_MODEL"') else line
+                for line in cell.get("source", [])
+            ]
+    return json.dumps(notebook, indent=2)
+
+
+async def _save_page_annotations(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+    annotation_mode: AnnotationWorkspaceMode,
+    annotations: list[WorkbenchAnnotation],
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    annotation_table = _annotation_table(annotation_mode)
+    for annotation in annotations:
+        if annotation.pageNum != page_num:
+            raise HTTPException(
+                status_code=400,
+                detail="annotation pageNum must match route page_num",
+            )
+    pool = await get_pool()
+    project_uuid = uuid.UUID(_project_id(project))
+    async with pool.connection() as conn:
+        await conn.execute(
+            f"""
+            DELETE FROM {annotation_table}
+            WHERE project_id = %s
+              AND document_id = %s
+              AND page_num = %s
+            """,
+            (project_uuid, document_id, page_num),
+        )
+        for annotation in annotations:
+            metadata = dict(annotation.metadata)
+            root_type = (
+                annotation.rootType
+                or metadata.get("rootType")
+                or annotation.type
+                or "component"
+            )
+            metadata_attachments = metadata.get("attachments")
+            attachments = (
+                metadata_attachments
+                if isinstance(metadata_attachments, list)
+                else annotation.attachments
+            )
+            metadata["rootType"] = root_type
+            metadata["attachments"] = attachments
+            await conn.execute(
+                f"""
+                INSERT INTO {annotation_table} (
+                    project_id,
+                    document_id,
+                    page_num,
+                    client_annotation_id,
+                    annotation_type,
+                    label,
+                    family,
+                    bbox,
+                    label_bbox,
+                    label_source,
+                    label_candidate_index,
+                    label_candidates,
+                    source,
+                    snapped,
+                    metadata
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s, %s, %s::jsonb
+                )
+                """,
+                (
+                    project_uuid,
+                    document_id,
+                    page_num,
+                    annotation.id,
+                    root_type,
+                    annotation.label,
+                    _symbol_family(annotation.label),
+                    json.dumps(annotation.bbox),
+                    json.dumps(annotation.labelBbox) if annotation.labelBbox else None,
+                    annotation.labelSource,
+                    annotation.labelCandidateIndex,
+                    json.dumps(annotation.labelCandidates),
+                    annotation.source,
+                    annotation.snapped,
+                    json.dumps(metadata),
+                ),
+            )
+        await conn.commit()
+    return await _get_page_annotations(project, document_id, page_num, annotation_mode)
+
+
+async def _create_page_annotation_snapshot(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+    body: WorkbenchAnnotationSnapshotCreate,
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    current = await _get_page_annotations(project, document_id, page_num)
+    annotations = current["annotations"]
+    pool = await get_pool()
+    project_uuid = uuid.UUID(_project_id(project))
+    async with pool.connection() as conn:
+        cursor = await conn.execute(
+            """
+            INSERT INTO schematic_annotation_snapshots (
+                project_id,
+                document_id,
+                page_num,
+                name,
+                annotations,
+                annotation_count,
+                notes,
+                source,
+                metadata
+            )
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (project_id, document_id, page_num, name) DO NOTHING
+            RETURNING
+                snapshot_id,
+                project_id,
+                document_id,
+                page_num,
+                name,
+                notes,
+                annotations,
+                annotation_count,
+                source,
+                metadata,
+                created_at
+            """,
+            (
+                project_uuid,
+                document_id,
+                page_num,
+                body.name,
+                json.dumps(annotations),
+                len(annotations),
+                body.notes,
+                body.source,
+                json.dumps(body.metadata),
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail="annotation snapshot name already exists for this page",
+            )
+        await conn.commit()
+    return _annotation_snapshot_row(row)
+
+
+async def _list_page_annotation_snapshots(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            """
+            SELECT
+                snapshot_id,
+                project_id,
+                document_id,
+                page_num,
+                name,
+                notes,
+                NULL::jsonb AS annotations,
+                annotation_count,
+                source,
+                metadata,
+                created_at
+            FROM schematic_annotation_snapshots
+            WHERE project_id = %s
+              AND document_id = %s
+              AND page_num = %s
+            ORDER BY created_at DESC, name ASC
+            """,
+            (uuid.UUID(_project_id(project)), document_id, page_num),
+        )
+        results = await rows.fetchall()
+    return {
+        "project_id": _project_id(project),
+        "document_id": document_id,
+        "page_num": page_num,
+        "snapshots": [
+            _annotation_snapshot_row(row, include_annotations=False)
+            for row in results
+        ],
+    }
+
+
+async def _get_page_annotation_snapshot(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+    snapshot_id: uuid.UUID,
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        rows = await conn.execute(
+            """
+            SELECT
+                snapshot_id,
+                project_id,
+                document_id,
+                page_num,
+                name,
+                notes,
+                annotations,
+                annotation_count,
+                source,
+                metadata,
+                created_at
+            FROM schematic_annotation_snapshots
+            WHERE project_id = %s
+              AND document_id = %s
+              AND page_num = %s
+              AND snapshot_id = %s
+            """,
+            (uuid.UUID(_project_id(project)), document_id, page_num, snapshot_id),
+        )
+        row = await rows.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="annotation snapshot not found")
+    return _annotation_snapshot_row(row)
+
+
+def _validate_workbench_page(document_id: str, page_num: int) -> None:
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+    if page_num < 1 or page_num > _PAGE_COUNT:
+        raise HTTPException(status_code=404, detail="workbench page not found")
+
+
+def _annotation_row(
+    row: Any,
+    symbol_entries: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    metadata = _metadata_with_attachment_identity(
+        row[11] or {},
+        symbol_entries or [],
+        label=row[2],
+    )
+    root_type = metadata.get("rootType") or row[3] or "component"
+    attachments = metadata.get("attachments") or []
+    return {
+        "id": row[0],
+        "pageNum": row[1],
+        "label": row[2],
+        "rootType": root_type,
+        "type": root_type,
+        "attachments": attachments,
+        "bbox": row[4],
+        "labelBbox": row[5],
+        "labelSource": row[6] or "manual",
+        "labelCandidateIndex": row[7],
+        "labelCandidates": row[8] or [],
+        "source": row[9],
+        "snapped": row[10],
+        "metadata": {
+            **metadata,
+            "rootType": root_type,
+            "attachments": attachments,
+        },
+        "createdAt": row[12].isoformat() if row[12] else None,
+        "updatedAt": row[13].isoformat() if row[13] else None,
+    }
+
+
+def _sheet_row_to_dict(row: tuple[object, ...]) -> dict[str, object]:
+    (
+        page_num, title_en, title_ja, section, sheet_ref, drawing_number,
+        scale, pdf_width, pdf_height, display_size, title_source, metadata,
+    ) = row
+    return {
+        "pageNum": page_num,
+        "title": {"en": title_en, "ja": title_ja},
+        "section": section,
+        "sheetRef": sheet_ref,
+        "drawingNumber": drawing_number,
+        "scale": scale,
+        "pdfWidth": pdf_width,
+        "pdfHeight": pdf_height,
+        "displaySize": display_size,
+        "titleSource": title_source,
+        "metadata": metadata,
+    }
+
+
+_SHEET_COLS = (
+    "page_num, title_en, title_ja, section, sheet_ref, drawing_number, "
+    "scale, pdf_width, pdf_height, display_size, title_source, metadata"
+)
+
+
+async def _get_sheet_index(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+) -> dict[str, object]:
+    """The canonical per-page record (schematic_sheet_index) — the single door
+    all app logic reads a page's identity from (Shane, 2026-07-08)."""
+    _validate_workbench_page(document_id, page_num)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cursor = await conn.execute(
+            f"""
+            SELECT {_SHEET_COLS}
+            FROM schematic_sheet_index
+            WHERE project_id = %s AND document_id = %s AND page_num = %s
+            """,
+            (uuid.UUID(_project_id(project)), document_id, page_num),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "schematic_sheet_index missing this page; "
+                "run scripts/populate_schematic_sheet_index.py"
+            ),
+        )
+    return _sheet_row_to_dict(row)
+
+
+async def _list_sheet_index(
+    project: dict[str, object],
+    document_id: str,
+) -> list[dict[str, object]]:
+    """The whole sheet index (feeds ⌘K jump-by-title)."""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cursor = await conn.execute(
+            f"""
+            SELECT {_SHEET_COLS}
+            FROM schematic_sheet_index
+            WHERE project_id = %s AND document_id = %s
+            ORDER BY page_num ASC
+            """,
+            (uuid.UUID(_project_id(project)), document_id),
+        )
+        rows = await cursor.fetchall()
+    return [_sheet_row_to_dict(r) for r in rows]
+
+
+async def _get_workbench_page_metadata(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT
+                document_id,
+                page_num,
+                scale,
+                pdf_width,
+                pdf_height,
+                display_size,
+                shapes,
+                source,
+                source_hash,
+                updated_at
+            FROM schematic_page_metadata
+            WHERE project_id = %s
+              AND document_id = %s
+              AND page_num = %s
+            """,
+            (uuid.UUID(_project_id(project)), document_id, page_num),
+        )
+        row = await cursor.fetchone()
+        text_cursor = await conn.execute(
+            """
+            SELECT text, bbox_pdf
+            FROM schematic_page_text_blocks
+            WHERE project_id = %s
+              AND document_id = %s
+              AND page_num = %s
+            ORDER BY block_index ASC
+            """,
+            (uuid.UUID(_project_id(project)), document_id, page_num),
+        )
+        text_rows = await text_cursor.fetchall()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "workbench page metadata missing from Neon; "
+                "run scripts/populate_schematic_page_metadata.py"
+            ),
+        )
+    if not text_rows:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "workbench PDF vector text blocks missing from Neon; "
+                "run scripts/populate_schematic_page_text_blocks.py"
+            ),
+        )
+    text_blocks = [
+        {"text": text, "bbox": bbox_pdf}
+        for text, bbox_pdf in text_rows
+    ]
+    return {
+        "document_id": row[0],
+        "page_num": row[1],
+        "scale": row[2],
+        "pdf_width": row[3],
+        "pdf_height": row[4],
+        "display_size": row[5],
+        "shapes": row[6] or [],
+        "text_blocks": text_blocks,
+        "source": row[7],
+        "source_hash": row[8],
+        "updated_at": row[9].isoformat() if row[9] else None,
+    }
+
+
+async def _detect_yolov26_page(
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+    body: WorkbenchYolov26PageDetect,
+) -> dict[str, object]:
+    _validate_workbench_page(document_id, page_num)
+    weights_path = Path(body.weightsPath) if body.weightsPath else _YOLOV26_WEIGHTS_PATH
+    python_path = Path(body.pythonPath) if body.pythonPath else Path(_YOLOV26_PYTHON)
+    page_image_path = _workbench_page_image_path(document_id, page_num)
+    image_root = page_image_path.parent
+    if not weights_path.exists():
+        raise HTTPException(status_code=500, detail=f"YOLOv26 weights not found: {weights_path}")
+    if not python_path.exists():
+        raise HTTPException(status_code=500, detail=f"YOLOv26 Python runtime not found: {python_path}")
+
+    run_id = f"yolov26-page-{page_num:03d}-{int(time.time())}"
+    output_root = _REPO_ROOT / ".tmp" / "yolo_page_detections" / run_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    predictions_path = output_root / "predictions.json"
+    roi_filter: tuple[int, int, int, int] | None = None
+    if body.roi is not None:
+        roi_left, roi_top, roi_right, roi_bottom = _validated_yolov26_roi(body.roi)
+        roi_filter = (roi_left, roi_top, roi_right, roi_bottom)
+        image_root = output_root / "roi-images"
+        image_root.mkdir(parents=True, exist_ok=True)
+        with Image.open(page_image_path) as page_image:
+            rgb_page = page_image.convert("RGB")
+            masked_page = Image.new("RGB", rgb_page.size, "white")
+            roi_crop = rgb_page.crop((roi_left, roi_top, roi_right, roi_bottom))
+            masked_page.paste(roi_crop, (roi_left, roi_top))
+            masked_page.save(image_root / f"page-{page_num:03d}.png")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_REPO_ROOT / "agent_server")
+    run_command = [
+        str(python_path),
+        str(_REPO_ROOT / "scripts" / "run_yolov26_predictions.py"),
+        "--weights",
+        str(weights_path),
+        "--images",
+        str(image_root),
+        "--out",
+        str(output_root),
+        "--start-page",
+        str(page_num),
+        "--end-page",
+        str(page_num),
+        "--imgsz",
+        str(body.imgsz),
+        "--conf",
+        str(body.conf),
+        "--iou",
+        str(body.iou),
+    ]
+    if body.agnosticNms:
+        run_command.append("--agnostic-nms")
+    started = time.perf_counter()
+    result = await asyncio.to_thread(
+        subprocess.run,
+        run_command,
+        cwd=str(_REPO_ROOT),
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "YOLOv26 page detection failed",
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            },
+        )
+    if not predictions_path.exists():
+        raise HTTPException(status_code=500, detail=f"YOLOv26 predictions not written: {predictions_path}")
+
+    payload = json.loads(predictions_path.read_text(encoding="utf-8"))
+    page_payload = next(
+        (page for page in payload.get("pages", []) if int(page.get("page", -1)) == page_num),
+        None,
+    )
+    if page_payload is None:
+        raise HTTPException(status_code=500, detail="YOLOv26 predictions did not include requested page")
+    predictions = page_payload.get("predictions")
+    if not isinstance(predictions, list):
+        raise HTTPException(status_code=500, detail="YOLOv26 predictions must contain a predictions list")
+    if roi_filter is not None:
+        predictions = [
+            prediction
+            for prediction in predictions
+            if _yolov26_prediction_center_in_roi(prediction, roi_filter)
+        ]
+    metadata = await _get_workbench_page_metadata(project, document_id, page_num)
+    predictions = [
+        _snap_yolov26_prediction_to_metadata(prediction, metadata)
+        for prediction in predictions
+    ]
+    raw_prediction_count = len(predictions)
+    predictions = _dedupe_yolov26_predictions(predictions)
+    page_payload["predictions"] = predictions
+    page_payload["roi"] = {
+        "x": roi_filter[0],
+        "y": roi_filter[1],
+        "width": roi_filter[2] - roi_filter[0],
+        "height": roi_filter[3] - roi_filter[1],
+    } if roi_filter else None
+    page_payload["raw_prediction_count"] = raw_prediction_count
+    page_payload["prediction_count"] = len(predictions)
+    prediction_count = len(predictions)
+    await _replace_yolov26_page_proposals(
+        project=project,
+        document_id=document_id,
+        page_num=page_num,
+        payload=payload,
+        run_id=run_id,
+        roi=roi_filter,
+    )
+    annotations = await _get_page_annotations(project, document_id, page_num, "yolo")
+    return {
+        "status": "done",
+        "runId": run_id,
+        "pageNum": page_num,
+        "predictionCount": prediction_count,
+        "rawPredictionCount": raw_prediction_count,
+        "outputDir": str(output_root),
+        "predictionsPath": str(predictions_path),
+        "elapsedMs": int(round((time.perf_counter() - started) * 1000)),
+        "annotations": annotations["annotations"],
+    }
+
+
+async def _replace_yolov26_page_proposals(
+    *,
+    project: dict[str, object],
+    document_id: str,
+    page_num: int,
+    payload: dict[str, object],
+    run_id: str,
+    roi: tuple[int, int, int, int] | None = None,
+) -> None:
+    page_payload = next(
+        (page for page in payload.get("pages", []) if int(page.get("page", -1)) == page_num),
+        None,
+    )
+    if page_payload is None:
+        raise HTTPException(status_code=500, detail="YOLOv26 predictions did not include requested page")
+    predictions = page_payload.get("predictions")
+    if not isinstance(predictions, list):
+        raise HTTPException(status_code=500, detail="YOLOv26 predictions must contain a predictions list")
+    predictions = _dedupe_yolov26_predictions(predictions)
+    page_metadata = await _get_workbench_page_metadata(project, document_id, page_num)
+    symbol_entries = (await _get_workbench_symbol_bank(project, document_id)).get(
+        "symbols", []
+    )
+
+    project_uuid = uuid.UUID(_project_id(project))
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        if roi is None:
+            await conn.execute(
+                """
+                DELETE FROM yolocolab
+                WHERE project_id = %s
+                  AND document_id = %s
+                  AND page_num = %s
+                  AND source = 'ai-proposal'
+                """,
+                (project_uuid, document_id, page_num),
+            )
+        else:
+            roi_left, roi_top, roi_right, roi_bottom = roi
+            await conn.execute(
+                """
+                DELETE FROM yolocolab
+                WHERE project_id = %s
+                  AND document_id = %s
+                  AND page_num = %s
+                  AND source = 'ai-proposal'
+                  AND ((bbox->>'x')::double precision + ((bbox->>'width')::double precision / 2.0))
+                    BETWEEN %s AND %s
+                  AND ((bbox->>'y')::double precision + ((bbox->>'height')::double precision / 2.0))
+                    BETWEEN %s AND %s
+                """,
+                (
+                    project_uuid,
+                    document_id,
+                    page_num,
+                    float(roi_left),
+                    float(roi_right),
+                    float(roi_top),
+                    float(roi_bottom),
+                ),
+            )
+        for prediction in predictions:
+            bbox = prediction.get("bbox")
+            if not isinstance(bbox, dict) or not _yolov26_bbox_is_valid(bbox):
+                raise HTTPException(status_code=500, detail=f"invalid YOLOv26 bbox on page {page_num}: {prediction}")
+            class_name = str(prediction.get("class_name") or "").strip()
+            if not class_name:
+                raise HTTPException(status_code=500, detail=f"missing YOLOv26 class name on page {page_num}: {prediction}")
+            prediction_index = int(prediction.get("index"))
+            confidence = float(prediction.get("confidence"))
+            label_candidates = _yolov26_label_candidates_for_bbox(
+                bbox,
+                page_metadata,
+                symbol_entries,
+            )
+            active_candidate = label_candidates[0] if label_candidates else None
+            active_symbol = (
+                active_candidate.get("symbol")
+                if isinstance(active_candidate, dict)
+                else None
+            )
+            component_identity = (
+                _component_identity_from_symbol(active_symbol)
+                if isinstance(active_symbol, dict)
+                else None
+            )
+            resolved_label = (
+                str(component_identity.get("class_family") or "").strip()
+                if component_identity
+                else class_name
+            )
+            label_bbox = active_candidate.get("bbox") if active_candidate else None
+            label_source = (
+                str(active_candidate.get("source") or "yolov26")
+                if active_candidate
+                else "yolov26"
+            )
+            label_candidate_index = 0 if active_candidate else -1
+            metadata = {
+                "rootType": "component",
+                "attachments": [],
+                "proposalRunId": run_id,
+                "reviewStatus": "pending",
+                "sourceModel": payload.get("model"),
+                "yolov26": {
+                    "classId": int(prediction.get("class_id")),
+                    "className": class_name,
+                    "confidence": confidence,
+                    "imgsz": payload.get("imgsz"),
+                    "confThreshold": payload.get("conf"),
+                    "iouThreshold": payload.get("iou"),
+                    "agnosticNms": payload.get("agnostic_nms"),
+                    "metadataSnap": prediction.get("metadata_snap"),
+                },
+                "provenance": {
+                    "projectId": str(project_uuid),
+                    "documentId": document_id,
+                    "pageNum": page_num,
+                    "coordinateSpace": "page_px",
+                    "pageSizePx": {"width": _PAGE_WIDTH_PX, "height": _PAGE_HEIGHT_PX},
+                    "bbox": bbox,
+                    "source": "yolov26_page_detection",
+                    "capturedAt": now,
+                },
+                "physicalSizePx": {
+                    "width": float(bbox["width"]),
+                    "height": float(bbox["height"]),
+                    "area": float(bbox["width"]) * float(bbox["height"]),
+                },
+            }
+            if component_identity:
+                metadata["componentIdentity"] = component_identity
+            client_id = f"{run_id}-d{prediction_index:03d}"
+            await conn.execute(
+                """
+                INSERT INTO yolocolab (
+                    project_id,
+                    document_id,
+                    page_num,
+                    client_annotation_id,
+                    annotation_type,
+                    label,
+                    family,
+                    bbox,
+                    label_bbox,
+                    label_source,
+                    label_candidate_index,
+                    label_candidates,
+                    source,
+                    snapped,
+                    metadata,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, 'component', %s, %s,
+                    %s::jsonb, %s::jsonb, %s, %s, %s::jsonb,
+                    'ai-proposal', false, %s::jsonb, now(), now()
+                )
+                """,
+                (
+                    project_uuid,
+                    document_id,
+                    page_num,
+                    client_id,
+                    resolved_label,
+                    resolved_label,
+                    json.dumps(bbox),
+                    json.dumps(label_bbox),
+                    label_source,
+                    label_candidate_index,
+                    json.dumps(label_candidates),
+                    json.dumps(metadata),
+                ),
+            )
+        await conn.commit()
+
+
+def _component_identity_from_symbol(symbol: dict[str, object]) -> dict[str, object]:
+    return {
+        "full_symbol": _clean_text(symbol.get("symbol")),
+        "class_family": _clean_text(symbol.get("family")),
+        "description": _clean_text(symbol.get("description")),
+        "part_number": _clean_text(symbol.get("part_number")),
+        "location": _clean_text(symbol.get("location")),
+        "source_page": _clean_text(symbol.get("source_page")),
+        "source": "parts_symbol_match",
+        "match_status": "symbol_match",
+    }
+
+
+def _yolov26_label_candidates_for_bbox(
+    component_bbox: dict[str, object],
+    page_metadata: dict[str, object],
+    symbol_entries: object,
+) -> list[dict[str, object]]:
+    scale = page_metadata.get("scale")
+    text_blocks = page_metadata.get("text_blocks")
+    if not isinstance(scale, (int, float)) or not isinstance(text_blocks, list):
+        return []
+    if not isinstance(symbol_entries, list):
+        return []
+
+    symbol_map = {
+        _normalize_symbol(entry.get("symbol")): entry
+        for entry in symbol_entries
+        if isinstance(entry, dict) and _normalize_symbol(entry.get("symbol"))
+    }
+    component = _bbox_float_dict(component_bbox)
+    expanded = _expand_px_bbox(component, 420.0)
+    component_center = _bbox_center(component)
+    candidates: list[dict[str, object]] = []
+
+    for block in text_blocks:
+        if not isinstance(block, dict):
+            continue
+        text = _clean_text(block.get("text"))
+        normalized = _normalize_symbol(text)
+        if not normalized or normalized.isdigit():
+            continue
+        pdf_bbox = block.get("bbox")
+        if not _pdf_bbox_is_valid(pdf_bbox):
+            continue
+        bbox = _pdf_bbox_to_px(pdf_bbox, float(scale))
+        if not _boxes_intersect(expanded, bbox):
+            continue
+
+        symbol = symbol_map.get(normalized)
+        if not symbol:
+            symbol = _symbol_from_adjacent_digits(
+                block,
+                text_blocks,
+                symbol_map,
+                float(scale),
+            )
+        distance = _point_distance(component_center, _bbox_center(bbox))
+        candidates.append(
+            {
+                "text": text,
+                "normalizedText": normalized,
+                "bbox": bbox,
+                "textFragments": [
+                    {
+                        "text": text,
+                        "normalizedText": normalized,
+                        "bbox": bbox,
+                    }
+                ],
+                "score": distance,
+                "distance": distance,
+                "source": "parts_symbol_match" if symbol else "text_proximity",
+                "reason": (
+                    "known_parts_list_symbol_nearby"
+                    if symbol
+                    else "nearby_vector_text"
+                ),
+                **({"symbol": symbol} if symbol else {}),
+            }
+        )
+
+    return sorted(
+        candidates,
+        key=lambda candidate: _yolov26_candidate_rank(candidate, component),
+    )[:24]
+
+
+def _symbol_from_adjacent_digits(
+    block: dict[str, object],
+    text_blocks: list[object],
+    symbol_map: dict[str, dict[str, object]],
+    scale: float,
+) -> dict[str, object] | None:
+    base = _normalize_symbol(block.get("text"))
+    if not re.fullmatch(r"[A-Z]+", base):
+        return None
+    pdf_bbox = block.get("bbox")
+    if not _pdf_bbox_is_valid(pdf_bbox):
+        return None
+    bbox = _pdf_bbox_to_px(pdf_bbox, scale)
+    right_edge = bbox["x"] + bbox["width"]
+    center_y = bbox["y"] + bbox["height"] / 2.0
+    line_tolerance = max(8.0, bbox["height"] * 0.8)
+    max_gap = max(18.0, bbox["height"] * 1.25)
+    digit_blocks: list[dict[str, object]] = []
+    for candidate in text_blocks:
+        if not isinstance(candidate, dict):
+            continue
+        normalized = _normalize_symbol(candidate.get("text"))
+        if not normalized.isdigit():
+            continue
+        candidate_pdf_bbox = candidate.get("bbox")
+        if not _pdf_bbox_is_valid(candidate_pdf_bbox):
+            continue
+        candidate_bbox = _pdf_bbox_to_px(candidate_pdf_bbox, scale)
+        candidate_center_y = candidate_bbox["y"] + candidate_bbox["height"] / 2.0
+        gap = candidate_bbox["x"] - right_edge
+        if (
+            gap >= -2
+            and gap <= max_gap
+            and abs(candidate_center_y - center_y) <= line_tolerance
+        ):
+            digit_blocks.append({"normalized": normalized, "bbox": candidate_bbox})
+    digit_blocks.sort(key=lambda item: float(item["bbox"]["x"]))
+
+    cursor_right = right_edge
+    suffix = ""
+    for digit_block in digit_blocks:
+        digit_bbox = digit_block["bbox"]
+        gap = float(digit_bbox["x"]) - cursor_right
+        if gap > max_gap:
+            break
+        suffix += str(digit_block["normalized"])
+        cursor_right = float(digit_bbox["x"]) + float(digit_bbox["width"])
+        symbol = symbol_map.get(f"{base}{suffix}")
+        if symbol:
+            return symbol
+    return None
+
+
+def _bbox_float_dict(bbox: dict[str, object]) -> dict[str, float]:
+    return {
+        "x": float(bbox["x"]),
+        "y": float(bbox["y"]),
+        "width": float(bbox["width"]),
+        "height": float(bbox["height"]),
+    }
+
+
+def _pdf_bbox_is_valid(bbox: object) -> bool:
+    return (
+        isinstance(bbox, list)
+        and len(bbox) == 4
+        and all(isinstance(value, (int, float)) for value in bbox)
+    )
+
+
+def _pdf_bbox_to_px(bbox: object, scale: float) -> dict[str, float]:
+    if not _pdf_bbox_is_valid(bbox):
+        raise ValueError(f"invalid PDF bbox: {bbox}")
+    left, top, right, bottom = [float(value) for value in bbox]
+    return {
+        "x": left * scale,
+        "y": top * scale,
+        "width": max(0.0, (right - left) * scale),
+        "height": max(0.0, (bottom - top) * scale),
+    }
+
+
+def _expand_px_bbox(bbox: dict[str, float], amount: float) -> dict[str, float]:
+    return {
+        "x": bbox["x"] - amount,
+        "y": bbox["y"] - amount,
+        "width": bbox["width"] + amount * 2.0,
+        "height": bbox["height"] + amount * 2.0,
+    }
+
+
+def _bbox_center(bbox: dict[str, float]) -> dict[str, float]:
+    return {
+        "x": bbox["x"] + bbox["width"] / 2.0,
+        "y": bbox["y"] + bbox["height"] / 2.0,
+    }
+
+
+def _point_distance(left: dict[str, float], right: dict[str, float]) -> float:
+    return math.hypot(left["x"] - right["x"], left["y"] - right["y"])
+
+
+def _boxes_intersect(left: dict[str, float], right: dict[str, float]) -> bool:
+    return not (
+        right["x"] > left["x"] + left["width"]
+        or right["x"] + right["width"] < left["x"]
+        or right["y"] > left["y"] + left["height"]
+        or right["y"] + right["height"] < left["y"]
+    )
+
+
+def _yolov26_candidate_rank(
+    candidate: dict[str, object],
+    component: dict[str, float],
+) -> tuple[float, float, float, float]:
+    bbox = candidate.get("bbox")
+    if not isinstance(bbox, dict):
+        return (99.0, 0.0, 0.0, float(candidate.get("distance") or 0.0))
+    candidate_bbox = {
+        "x": float(bbox["x"]),
+        "y": float(bbox["y"]),
+        "width": float(bbox["width"]),
+        "height": float(bbox["height"]),
+    }
+    candidate_center = _bbox_center(candidate_bbox)
+    candidate_bottom = candidate_bbox["y"] + candidate_bbox["height"]
+    component_center = _bbox_center(component)
+    component_right = component["x"] + component["width"]
+    candidate_right = candidate_bbox["x"] + candidate_bbox["width"]
+    horizontal_padding = max(16.0, component["width"] * 0.25)
+    overlaps_x = candidate_bbox["x"] <= component_right and candidate_right >= component["x"]
+    near_x = (
+        candidate_bbox["x"] <= component_right + horizontal_padding
+        and candidate_right >= component["x"] - horizontal_padding
+    )
+    above = candidate_bottom <= component["y"] + 10.0
+    zone = 0 if above and overlaps_x else 1 if above and near_x else 2 if above else 3
+    known_penalty = 0.0 if candidate.get("symbol") else 1.0
+    return (
+        float(zone),
+        known_penalty,
+        abs(candidate_center["x"] - component_center["x"]),
+        float(candidate.get("distance") or 0.0),
+    )
+
+
+def _yolov26_bbox_is_valid(bbox: dict[str, object]) -> bool:
+    try:
+        x = float(bbox["x"])
+        y = float(bbox["y"])
+        width = float(bbox["width"])
+        height = float(bbox["height"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        width > 0
+        and height > 0
+        and x >= 0
+        and y >= 0
+        and x + width <= _PAGE_WIDTH_PX
+        and y + height <= _PAGE_HEIGHT_PX
+    )
+
+
+def _validated_yolov26_roi(roi: WorkbenchYolov26DetectRoi) -> tuple[int, int, int, int]:
+    left = int(math.floor(roi.x))
+    top = int(math.floor(roi.y))
+    right = int(math.ceil(roi.x + roi.width))
+    bottom = int(math.ceil(roi.y + roi.height))
+    if (
+        roi.width <= 0
+        or roi.height <= 0
+        or left < 0
+        or top < 0
+        or right > _PAGE_WIDTH_PX
+        or bottom > _PAGE_HEIGHT_PX
+        or right <= left
+        or bottom <= top
+    ):
+        raise HTTPException(status_code=400, detail=f"invalid YOLOv26 ROI: {roi.model_dump()}")
+    return left, top, right, bottom
+
+
+def _offset_yolov26_prediction_bbox(
+    prediction: object,
+    offset_x: float,
+    offset_y: float,
+) -> dict[str, object]:
+    if not isinstance(prediction, dict):
+        raise HTTPException(status_code=500, detail=f"invalid YOLOv26 prediction object: {prediction}")
+    bbox = prediction.get("bbox")
+    if not isinstance(bbox, dict):
+        raise HTTPException(status_code=500, detail=f"YOLOv26 ROI prediction is missing bbox: {prediction}")
+    try:
+        x = float(bbox["x"]) + offset_x
+        y = float(bbox["y"]) + offset_y
+        width = float(bbox["width"])
+        height = float(bbox["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"invalid YOLOv26 ROI bbox: {prediction}") from exc
+    adjusted_bbox = {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+    }
+    if not _yolov26_bbox_is_valid(adjusted_bbox):
+        raise HTTPException(status_code=500, detail=f"YOLOv26 ROI bbox offset outside page: {prediction}")
+    return {
+        **prediction,
+        "bbox": adjusted_bbox,
+        "bbox_xyxy": [x, y, x + width, y + height],
+    }
+
+
+def _yolov26_prediction_center_in_roi(
+    prediction: object,
+    roi: tuple[int, int, int, int],
+) -> bool:
+    if not isinstance(prediction, dict):
+        raise HTTPException(status_code=500, detail=f"invalid YOLOv26 prediction object: {prediction}")
+    bbox = prediction.get("bbox")
+    if not isinstance(bbox, dict):
+        raise HTTPException(status_code=500, detail=f"YOLOv26 prediction is missing bbox: {prediction}")
+    try:
+        center_x = float(bbox["x"]) + float(bbox["width"]) / 2.0
+        center_y = float(bbox["y"]) + float(bbox["height"]) / 2.0
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"invalid YOLOv26 bbox: {prediction}") from exc
+    left, top, right, bottom = roi
+    return float(left) <= center_x <= float(right) and float(top) <= center_y <= float(bottom)
+
+
+def _snap_yolov26_prediction_to_metadata(
+    prediction: object,
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    if not isinstance(prediction, dict):
+        raise HTTPException(status_code=500, detail=f"invalid YOLOv26 prediction object: {prediction}")
+    bbox = prediction.get("bbox")
+    if not isinstance(bbox, dict):
+        raise HTTPException(status_code=500, detail=f"YOLOv26 prediction is missing bbox: {prediction}")
+    try:
+        x = float(bbox["x"])
+        y = float(bbox["y"])
+        width = float(bbox["width"])
+        height = float(bbox["height"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"invalid YOLOv26 bbox: {prediction}") from exc
+
+    if width > 220 or height > 140:
+        return prediction
+    scale = metadata.get("scale")
+    shapes = metadata.get("shapes")
+    if not isinstance(scale, (int, float)) or scale <= 0:
+        raise HTTPException(status_code=500, detail="YOLOv26 metadata snap requires page scale")
+    if not isinstance(shapes, list):
+        raise HTTPException(status_code=500, detail="YOLOv26 metadata snap requires page shapes")
+
+    center_pdf = {
+        "x": (x + width / 2) / float(scale),
+        "y": (y + height / 2) / float(scale),
+    }
+    predicted_pdf = {
+        "x0": x / float(scale),
+        "y0": y / float(scale),
+        "x1": (x + width) / float(scale),
+        "y1": (y + height) / float(scale),
+    }
+    candidates: list[tuple[float, dict[str, float]]] = []
+    for shape in shapes:
+        if not isinstance(shape, dict):
+            continue
+        raw = shape.get("bbox")
+        if not isinstance(raw, list) or len(raw) != 4:
+            continue
+        try:
+            sx0, sy0, sx1, sy1 = [float(value) for value in raw]
+        except (TypeError, ValueError):
+            continue
+        shape_box = _normalized_pdf_box(sx0, sy0, sx1, sy1)
+        if not _is_compact_yolov26_component_shape(shape_box):
+            continue
+        distance = _pdf_distance_to_box(center_pdf, shape_box)
+        if distance > 12 and not _pdf_boxes_intersect(_expand_pdf_box(shape_box, 2.5), predicted_pdf):
+            continue
+        area_delta = abs(
+            (shape_box["x1"] - shape_box["x0"]) * (shape_box["y1"] - shape_box["y0"])
+            - (predicted_pdf["x1"] - predicted_pdf["x0"]) * (predicted_pdf["y1"] - predicted_pdf["y0"])
+        )
+        candidates.append((distance * 1000 + area_delta, shape_box))
+
+    if not candidates:
+        return prediction
+    _, snapped_pdf = sorted(candidates, key=lambda item: item[0])[0]
+    padding_pdf = 2 / float(scale)
+    snapped_pdf = _expand_pdf_box(snapped_pdf, padding_pdf)
+    snapped_bbox = {
+        "x": max(0.0, snapped_pdf["x0"] * float(scale)),
+        "y": max(0.0, snapped_pdf["y0"] * float(scale)),
+        "width": max(1.0, (snapped_pdf["x1"] - snapped_pdf["x0"]) * float(scale)),
+        "height": max(1.0, (snapped_pdf["y1"] - snapped_pdf["y0"]) * float(scale)),
+    }
+    if not _yolov26_bbox_is_valid(snapped_bbox):
+        raise HTTPException(status_code=500, detail=f"YOLOv26 metadata snap produced invalid bbox: {prediction}")
+    return {
+        **prediction,
+        "bbox": snapped_bbox,
+        "bbox_xyxy": [
+            snapped_bbox["x"],
+            snapped_bbox["y"],
+            snapped_bbox["x"] + snapped_bbox["width"],
+            snapped_bbox["y"] + snapped_bbox["height"],
+        ],
+        "metadata_snap": {
+            "source": "page_shape_compact_component",
+            "original_bbox": bbox,
+        },
+    }
+
+
+def _normalized_pdf_box(x0: float, y0: float, x1: float, y1: float) -> dict[str, float]:
+    left = min(x0, x1)
+    top = min(y0, y1)
+    right = max(x0, x1)
+    bottom = max(y0, y1)
+    return {"x0": left, "y0": top, "x1": right, "y1": bottom}
+
+
+def _expand_pdf_box(box: dict[str, float], amount: float) -> dict[str, float]:
+    return {
+        "x0": box["x0"] - amount,
+        "y0": box["y0"] - amount,
+        "x1": box["x1"] + amount,
+        "y1": box["y1"] + amount,
+    }
+
+
+def _is_compact_yolov26_component_shape(box: dict[str, float]) -> bool:
+    width = box["x1"] - box["x0"]
+    height = box["y1"] - box["y0"]
+    if width <= 0 or height <= 0:
+        return False
+    max_side = max(width, height)
+    min_side = min(width, height)
+    if max_side > 70 or min_side > 24:
+        return False
+    if max_side < 6 or min_side < 2:
+        return False
+    return True
+
+
+def _pdf_distance_to_box(point: dict[str, float], box: dict[str, float]) -> float:
+    dx = max(box["x0"] - point["x"], 0.0, point["x"] - box["x1"])
+    dy = max(box["y0"] - point["y"], 0.0, point["y"] - box["y1"])
+    return math.hypot(dx, dy)
+
+
+def _pdf_boxes_intersect(left: dict[str, float], right: dict[str, float]) -> bool:
+    return not (
+        right["x0"] > left["x1"]
+        or right["x1"] < left["x0"]
+        or right["y0"] > left["y1"]
+        or right["y1"] < left["y0"]
+    )
+
+
+def _dedupe_yolov26_predictions(
+    predictions: list[object],
+    *,
+    iou_threshold: float = 0.45,
+    contained_overlap_threshold: float = 0.62,
+) -> list[dict[str, object]]:
+    typed_predictions = [
+        prediction for prediction in predictions if isinstance(prediction, dict)
+    ]
+    ordered = sorted(
+        typed_predictions,
+        key=lambda prediction: float(prediction.get("confidence") or 0),
+        reverse=True,
+    )
+    kept: list[dict[str, object]] = []
+    for prediction in ordered:
+        bbox = prediction.get("bbox")
+        if not isinstance(bbox, dict):
+            kept.append(prediction)
+            continue
+        duplicate = False
+        for existing in kept:
+            existing_bbox = existing.get("bbox")
+            if not isinstance(existing_bbox, dict):
+                continue
+            if (
+                _bbox_iou_px(bbox, existing_bbox) >= iou_threshold
+                or _bbox_min_area_overlap_px(bbox, existing_bbox)
+                >= contained_overlap_threshold
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(prediction)
+    return sorted(kept, key=lambda prediction: int(prediction.get("index") or 0))
+
+
+def _bbox_iou_px(left: dict[str, object], right: dict[str, object]) -> float:
+    lx, ly, lw, lh = _bbox_metrics_px(left)
+    rx, ry, rw, rh = _bbox_metrics_px(right)
+    intersection = _bbox_intersection_area(lx, ly, lw, lh, rx, ry, rw, rh)
+    union = lw * lh + rw * rh - intersection
+    if union <= 0:
+        return 0.0
+    return intersection / union
+
+
+def _bbox_min_area_overlap_px(left: dict[str, object], right: dict[str, object]) -> float:
+    lx, ly, lw, lh = _bbox_metrics_px(left)
+    rx, ry, rw, rh = _bbox_metrics_px(right)
+    intersection = _bbox_intersection_area(lx, ly, lw, lh, rx, ry, rw, rh)
+    smaller_area = min(lw * lh, rw * rh)
+    if smaller_area <= 0:
+        return 0.0
+    return intersection / smaller_area
+
+
+def _bbox_metrics_px(bbox: dict[str, object]) -> tuple[float, float, float, float]:
+    return (
+        float(bbox["x"]),
+        float(bbox["y"]),
+        float(bbox["width"]),
+        float(bbox["height"]),
+    )
+
+
+def _bbox_intersection_area(
+    lx: float,
+    ly: float,
+    lw: float,
+    lh: float,
+    rx: float,
+    ry: float,
+    rw: float,
+    rh: float,
+) -> float:
+    ix1 = max(lx, rx)
+    iy1 = max(ly, ry)
+    ix2 = min(lx + lw, rx + rw)
+    iy2 = min(ly + lh, ry + rh)
+    return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+
+
+def _metadata_with_attachment_identity(
+    metadata: dict[str, object],
+    symbol_entries: list[dict[str, object]],
+    *,
+    label: object = "",
+) -> dict[str, object]:
+    if not isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata.get("componentIdentity"), dict):
+        return metadata
+    identity = _component_identity_from_attachments(metadata, symbol_entries, label=label)
+    if not identity:
+        return metadata
+    return {**metadata, "componentIdentity": identity}
+
+
+def _component_identity_from_attachments(
+    metadata: dict[str, object],
+    symbol_entries: list[dict[str, object]],
+    *,
+    label: object = "",
+) -> dict[str, object] | None:
+    attachments = metadata.get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    attachment_parts = {
+        _normalize_part_number(attachment.get("text"))
+        for attachment in attachments
+        if isinstance(attachment, dict)
+        and str(attachment.get("type") or "") in {"part_number", "spec"}
+    }
+    attachment_parts.discard("")
+    if not attachment_parts:
+        return None
+    for symbol in symbol_entries:
+        part_number = _normalize_part_number(symbol.get("part_number"))
+        if part_number and part_number in attachment_parts:
+            return {
+                "full_symbol": _clean_text(symbol.get("symbol")),
+                "class_family": _clean_text(symbol.get("family")),
+                "description": _clean_text(symbol.get("description")),
+                "part_number": _clean_text(symbol.get("part_number")),
+                "location": _clean_text(symbol.get("location")),
+                "source_page": _clean_text(symbol.get("source_page")),
+                "source": "parts_attachment_match",
+                "match_status": "part_number_attachment_match",
+            }
+    schematic_part_number = _first_attachment_text(attachments, {"part_number", "spec"})
+    schematic_context = _first_attachment_text(attachments, {"text"})
+    schematic_label = _clean_text(label)
+    if not schematic_part_number and not schematic_context:
+        return None
+    description = _human_readable_context_text(schematic_context) or schematic_label
+    return {
+        "full_symbol": schematic_label,
+        "class_family": _symbol_family(schematic_label) if schematic_label else "",
+        "description": description,
+        "part_number": schematic_part_number,
+        "location": "",
+        "source_page": "",
+        "source": "schematic_context",
+        "match_status": "no_parts_list_match_schematic_attachments",
+    }
+
+
+def _first_attachment_text(
+    attachments: list[object],
+    attachment_types: set[str],
+) -> str:
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        if str(attachment.get("type") or "") not in attachment_types:
+            continue
+        text = _clean_text(attachment.get("text"))
+        if text:
+            return text
+    return ""
+
+
+def _human_readable_context_text(value: object) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"[_\s-]+", " ", text).strip()
+    if text.isupper() and " " not in text:
+        known_terms = {
+            "SERVOMOTOR": "SERVO MOTOR",
+            "NOISEFILTER": "NOISE FILTER",
+            "LINENOISEFILTER": "LINE NOISE FILTER",
+            "MAGNETICCONTACTOR": "MAGNETIC CONTACTOR",
+            "EARTHLEAKAGEBREAKER": "EARTH LEAKAGE BREAKER",
+        }
+        return known_terms.get(text, text)
+    return text
+
+
+def _annotation_snapshot_row(
+    row: Any,
+    *,
+    include_annotations: bool = True,
+) -> dict[str, object]:
+    payload = {
+        "snapshot_id": str(row[0]),
+        "project_id": str(row[1]),
+        "document_id": row[2],
+        "page_num": row[3],
+        "name": row[4],
+        "notes": row[5],
+        "annotation_count": row[7],
+        "source": row[8],
+        "metadata": row[9] or {},
+        "created_at": row[10].isoformat() if hasattr(row[10], "isoformat") else row[10],
+    }
+    if include_annotations:
+        payload["annotations"] = row[6] or []
+    return payload
+
+
+async def _get_workbench_symbol_bank(
+    project: dict[str, object],
+    document_id: str,
+) -> dict[str, object]:
+    """Return known component symbols for Workbench label auto-pairing.
+
+    Neon is the preferred source because it is the platform system of record for
+    extracted documents. A local CSV fallback keeps the development Workbench
+    usable when Neon is temporarily unavailable.
+    """
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+
+    neon_entries = await _load_symbol_bank_from_neon(uuid.UUID(_project_id(project)))
+    if neon_entries:
+        return {
+            "project_id": _project_id(project),
+            "document_id": document_id,
+            "source": "neon:document_extraction_rows",
+            "symbols": neon_entries,
+        }
+
+    csv_entries = _load_symbol_bank_from_csv()
+    return {
+        "project_id": _project_id(project),
+        "document_id": document_id,
+        "source": "local_csv_fallback",
+        "symbols": csv_entries,
+    }
+
+
+async def _get_workbench_wire_label_bank(
+    project: dict[str, object],
+    document_id: str,
+) -> dict[str, object]:
+    """Return known machine-cable wire labels for Workbench wire-label classification."""
+    if document_id != _DEFAULT_DOCUMENT_ID:
+        raise HTTPException(status_code=404, detail="workbench document not found")
+
+    entries = await _load_wire_label_bank_from_neon(uuid.UUID(_project_id(project)))
+    return {
+        "project_id": _project_id(project),
+        "document_id": document_id,
+        "source": "neon:document_extraction_rows",
+        "wire_labels": entries,
+    }
+
+
+async def _load_symbol_bank_from_neon(project_id: uuid.UUID) -> list[dict[str, object]]:
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT r.symbol_text, r.description, r.part_number, r.location, r.source_page
+                FROM document_extraction_rows r
+                JOIN document_extractions e ON e.extraction_id = r.extraction_id
+                WHERE r.symbol_text IS NOT NULL
+                  AND r.symbol_text <> ''
+                  AND e.project_id = %s
+                  AND e.extraction_kind = 'electrical_parts_list'
+                  AND e.source_pdf_path ILIKE %s
+                ORDER BY e.created_at DESC, r.row_index ASC
+                LIMIT 5000
+                """,
+                (project_id, "%ELECTRICAL%PARTS%LIST%151%E8810%601%0%"),
+            )
+            rows = await cur.fetchall()
+    except Exception:
+        return []
+
+    entries: list[dict[str, object]] = []
+    for symbol_text, description, part_number, location, source_page in rows:
+        for symbol in _split_symbols(str(symbol_text or "")):
+            entries.append(
+                _symbol_entry(
+                    symbol=symbol,
+                    description=description,
+                    part_number=part_number,
+                    location=location,
+                    source_page=source_page,
+                )
+            )
+    return _dedupe_symbol_entries(entries)
+
+
+async def _load_wire_label_bank_from_neon(project_id: uuid.UUID) -> list[dict[str, object]]:
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT
+                    r.row_data ->> 'Wire Label' AS wire_label,
+                    r.row_data ->> 'Cable Number' AS cable_number,
+                    r.row_data ->> 'Originating Point' AS originating_point,
+                    r.row_data ->> 'Termination Point' AS termination_point,
+                    r.source_page,
+                    e.extraction_id,
+                    e.created_at
+                FROM document_extraction_rows r
+                JOIN document_extractions e ON e.extraction_id = r.extraction_id
+                WHERE e.project_id = %s
+                  AND e.extraction_kind = 'dcm_cable_list_wire_labels'
+                  AND e.output_contract = 'wire_labels'
+                  AND COALESCE(r.row_data ->> 'Wire Label', '') <> ''
+                ORDER BY e.created_at DESC, r.row_index ASC
+                LIMIT 10000
+                """,
+                (project_id,),
+            )
+            rows = await cur.fetchall()
+    except Exception:
+        return []
+
+    entries: list[dict[str, object]] = []
+    for (
+        wire_label,
+        cable_number,
+        originating_point,
+        termination_point,
+        source_page,
+        extraction_id,
+        created_at,
+    ) in rows:
+        label = _normalize_wire_label(wire_label)
+        if not label:
+            continue
+        entries.append(
+            {
+                "wire_label": label,
+                "raw_label": _clean_text(wire_label),
+                "cable_number": _clean_text(cable_number),
+                "originating_point": _clean_text(originating_point),
+                "termination_point": _clean_text(termination_point),
+                "source_page": _clean_text(source_page),
+                "extraction_id": str(extraction_id),
+                "extracted_at": created_at.isoformat() if created_at else "",
+            }
+        )
+    return _dedupe_wire_label_entries(entries)
+
+
+def _load_symbol_bank_from_csv() -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for path in _SYMBOL_BANK_CSV_PATHS:
+        if not path.exists():
+            continue
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                for symbol in _split_symbols(row.get("Symbol Text", "")):
+                    entries.append(
+                        _symbol_entry(
+                            symbol=symbol,
+                            description=row.get("Description"),
+                            part_number=row.get("Part Number"),
+                            location=row.get("Location"),
+                            source_page=row.get("Source Page"),
+                        )
+                    )
+        if entries:
+            break
+    return _dedupe_symbol_entries(entries)
+
+
+def _symbol_entry(
+    *,
+    symbol: str,
+    description: object = None,
+    part_number: object = None,
+    location: object = None,
+    source_page: object = None,
+) -> dict[str, object]:
+    normalized = _normalize_symbol(symbol)
+    return {
+        "symbol": normalized,
+        "family": _symbol_family(normalized),
+        "suffix": _symbol_suffix(normalized),
+        "suffix_semantics": "opaque_identifier",
+        "description": _clean_text(description),
+        "part_number": _clean_text(part_number),
+        "location": _clean_text(location),
+        "source_page": _clean_text(source_page),
+    }
+
+
+def _dedupe_symbol_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    deduped: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        symbol = str(entry.get("symbol") or "")
+        if symbol and symbol not in deduped:
+            deduped[symbol] = entry
+    return sorted(deduped.values(), key=lambda item: str(item["symbol"]))
+
+
+def _dedupe_wire_label_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    deduped: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        wire_label = str(entry.get("wire_label") or "")
+        cable_number = str(entry.get("cable_number") or "")
+        origin = str(entry.get("originating_point") or "")
+        termination = str(entry.get("termination_point") or "")
+        key = f"{wire_label}|{cable_number}|{origin}|{termination}"
+        if wire_label and key not in deduped:
+            deduped[key] = entry
+    return sorted(
+        deduped.values(),
+        key=lambda item: (
+            str(item.get("wire_label") or ""),
+            str(item.get("cable_number") or ""),
+        ),
+    )
+
+
+def _split_symbols(value: object) -> list[str]:
+    normalized = str(value or "").replace("\r", "\n").replace("\u3000", " ")
+    symbols: list[str] = []
+    for line in normalized.split("\n"):
+        text = _normalize_symbol(line)
+        if not text:
+            continue
+        shorthand = re.fullmatch(r"([A-Z]+)(\d+[A-Z]?),(\d+[A-Z]?)", text)
+        if shorthand:
+            family, left, right = shorthand.groups()
+            symbols.extend([f"{family}{left}", f"{family}{right}"])
+            continue
+        spaced = re.fullmatch(r"([A-Z]+)\s+(\d+[A-Z]?)", line.strip().upper())
+        if spaced:
+            symbols.append(f"{spaced.group(1)}{spaced.group(2)}")
+            continue
+        for part in re.split(r"[,;/]", text):
+            part = _normalize_symbol(part)
+            if part:
+                symbols.extend(_split_concatenated_symbols(part))
+    return symbols
+
+
+def _split_concatenated_symbols(value: str) -> list[str]:
+    if not value:
+        return []
+    family_match = re.match(r"^([A-Z]+)\d", value)
+    if not family_match:
+        return [value]
+    family = family_match.group(1)
+    token_pattern = re.compile(rf"{re.escape(family)}\d+")
+    tokens = [match.group(0) for match in token_pattern.finditer(value)]
+    if len(tokens) > 1 and "".join(tokens) == value:
+        return tokens
+    return [value]
+
+
+def _normalize_symbol(value: object) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).upper()
+    text = "".join(
+        chr(ord(char) - 0xFEE0) if "！" <= char <= "～" else char for char in text
+    )
+    return re.sub(r"[^A-Z0-9-]", "", text)
+
+
+def _normalize_wire_label(value: object) -> str:
+    text = str(value or "").upper()
+    text = "".join(
+        chr(ord(char) - 0xFEE0) if "！" <= char <= "～" else char for char in text
+    )
+    text = text.replace("−", "-").replace("–", "-").replace("—", "-")
+    return re.sub(r"[^A-Z0-9+\\-]", "", text)
+
+
+def _dataset_component_class_name(label: str) -> str:
+    normalized = _normalize_symbol(label)
+    if normalized == "CONTINUATION":
+        return "continuation"
+    match = re.match(r"[A-Z]+", normalized)
+    if match:
+        return match.group(0)
+    embedded_matches = [
+        (normalized.rfind(family), len(family), family)
+        for family in _KNOWN_COMPONENT_CLASS_FAMILIES
+        if normalized.rfind(family) >= 0
+    ]
+    if embedded_matches:
+        _, _, family = max(embedded_matches)
+        return family
+    return "unknown_component"
+
+
+def _dataset_attachment_class_name(
+    attachment_type: str,
+    attachment_text: str,
+    owner_label: str,
+) -> str:
+    if attachment_type == "wire_label":
+        return _dataset_wire_label_class_name(attachment_text)
+    if attachment_type == "part_number":
+        return f"{_dataset_component_class_name(owner_label)}_part_number"
+    if attachment_type == "spec":
+        return f"{_dataset_component_class_name(owner_label)}_spec"
+    return f"component_{attachment_type or 'attachment'}"
+
+
+def _dataset_root_class_name(root_type: str, label: str) -> str:
+    if root_type == "wire_label":
+        return _dataset_wire_label_class_name(label)
+    if root_type == "part_number":
+        return "unknown_component_part_number"
+    if root_type == "spec":
+        return "unknown_component_spec"
+    if root_type == "continuation":
+        return "continuation"
+    return root_type
+
+
+def _dataset_wire_label_class_name(value: str) -> str:
+    label = _normalize_wire_label(value)
+    if label == "P5":
+        return "Wire Label (+5v)"
+    if label == "N5":
+        return "Wire Label (-5v)"
+    if label == "P24":
+        return "Wire Label (+24v)"
+    if label == "N24":
+        return "Wire Label (-24v)"
+    if label == "NC24":
+        return "Wire Label (com24v)"
+    if re.fullmatch(r"X\d{4,}", label):
+        return "Input Signal Wire"
+    if re.fullmatch(r"Y\d{4,}", label):
+        return "Output Signal Wire"
+    return "Wire Label"
+
+
+def _symbol_family(symbol: str) -> str:
+    match = re.match(r"[A-Z-]+", symbol)
+    return match.group(0).rstrip("-") if match else symbol
+
+
+def _symbol_suffix(symbol: str) -> str:
+    family = _symbol_family(symbol)
+    return symbol[len(family) :]
+
+
+def _clean_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()

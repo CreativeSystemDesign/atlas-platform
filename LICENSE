@@ -1,0 +1,29 @@
+Atlas-Platform Review & Evaluation License
+Copyright (c) 2026 Eric Shane Gross · Creative System Design. All rights reserved.
+
+Permission is granted, free of charge, to any person obtaining a copy of this
+software and associated files (the "Software"), to:
+
+  1. READ and REVIEW the Software's source code; and
+  2. RUN the Software locally, solely to EVALUATE it.
+
+No other rights are granted. Without limiting the foregoing, the following are
+expressly NOT permitted without prior written permission from the copyright
+holder:
+
+  - use of the Software, in whole or in part, in production or for any
+    commercial purpose;
+  - distribution of the Software or of any modified version of it, except as
+    an unmodified fork on the hosting platform where it is published;
+  - creation of derivative works;
+  - use of the Software, its architecture, or its documentation in the
+    development of a competing product or service;
+  - removal of this license or of copyright notices.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+For any permission beyond this license: https://atlas-platform.cloud

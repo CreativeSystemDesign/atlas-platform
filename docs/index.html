@@ -1,0 +1,1362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atlas-Platform — a digital twin of your machine's documentation</title>
+<meta name="description" content="Turn your machines' PDFs into Certified, queryable data. Which breaker, which wire, which page — answered in seconds, every fact traced to its printed source.">
+<link rel="canonical" href="https://atlas-platform.cloud/">
+<link rel="preload" href="assets/fonts/ibm-plex-sans-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="canonical" href="https://atlas-platform.cloud/">
+<link rel="preload" href="assets/fonts/ibm-plex-mono-400-latin.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  @font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 100 700;
+    font-display: swap; src: url('assets/fonts/ibm-plex-sans-var-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+  @font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 100 700;
+    font-display: swap; src: url('assets/fonts/ibm-plex-sans-var-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0332, U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400;
+    font-display: swap; src: url('assets/fonts/ibm-plex-mono-400-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 600;
+    font-display: swap; src: url('assets/fonts/ibm-plex-mono-600-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+  :root {
+    color-scheme: dark;
+    --bg: #0a121b;
+    --bg2: #0d1622;
+    --panel: #111c29;
+    --line: #1b2d3f;
+    --ink: #e6eff7;
+    --body: #a9bdcf;
+    --dim: #8199ad;
+    --dimmer: #587085;
+    --cyan: #22d3ee;
+    --cyan-soft: #67e8f9;
+    --amber: #fbbf24;
+    /* elevation ramp — lit from above: hairline ring + inset top-light + stacked drops */
+    --elev1: 0 0 0 .5px rgba(255,255,255,.05), inset 0 1px 0 rgba(255,255,255,.05),
+             0 2px 6px rgba(0,0,0,.45);
+    --elev2: 0 0 0 .5px rgba(255,255,255,.07), inset 0 1px 0 rgba(255,255,255,.07),
+             0 8px 22px rgba(0,0,0,.5);
+    --elev3: 0 0 0 .5px rgba(255,255,255,.09), inset 0 1px 0 rgba(255,255,255,.1),
+             0 14px 34px rgba(0,0,0,.6);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+         line-height: 1.6; overflow-x: hidden; }
+  a { color: var(--cyan-soft); text-decoration: none; }
+  ::selection { background: #164e63; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ---------- ambient aurora ---------- */
+  .aurora { position: fixed; inset: -20%; z-index: 0; pointer-events: none; filter: blur(90px); }
+  .aurora i { position: absolute; border-radius: 50%; opacity: .17; }
+  .aurora i:nth-child(1) { width: 46vw; height: 46vw; left: -8vw; top: -6vw;
+    background: radial-gradient(circle, #0e7490, transparent 65%);
+    animation: drift1 26s ease-in-out infinite alternate; }
+  .aurora i:nth-child(2) { width: 40vw; height: 40vw; right: -10vw; top: 28vh;
+    background: radial-gradient(circle, #155e75, transparent 65%);
+    animation: drift2 34s ease-in-out infinite alternate; }
+  .aurora i:nth-child(3) { width: 44vw; height: 44vw; left: 6vw; top: 66vh; opacity: .12;
+    background: radial-gradient(circle, #0e7490, transparent 65%);
+    animation: drift3 40s ease-in-out infinite alternate; }
+  @keyframes drift1 { to { transform: translate(9vw, 14vh) scale(1.15); } }
+  @keyframes drift2 { to { transform: translate(-9vw, -10vh) scale(.9); } }
+  @keyframes drift3 { to { transform: translate(11vw, -8vh) scale(1.1); } }
+
+  /* ---------- scroll progress ---------- */
+  #progress { position: fixed; top: 0; left: 0; height: 2px; width: 0;
+    background: linear-gradient(90deg, var(--cyan), var(--cyan-soft));
+    box-shadow: 0 0 12px rgba(34,211,238,.8); z-index: 50; }
+
+  /* ---------- top bar ---------- */
+  nav { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(10px);
+        background: rgba(10,18,27,.84); border-bottom: 1px solid var(--line);
+        transition: box-shadow .3s; }
+  nav.scrolled { box-shadow: 0 8px 30px rgba(0,0,0,.45); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px;
+              column-gap: 1.1rem; }
+  .brand { font-weight: 700; letter-spacing: .24em; font-size: .8rem; color: var(--ink);
+           position: relative; z-index: 0; white-space: nowrap; }
+  /* the dash is a live trace segment */
+  .brand .bdash { display: inline-block; width: 1.35em; height: 2px; vertical-align: middle;
+    margin: 0 .24em 0 .08em; border-radius: 1px; transform: translateY(-1px);
+    background: linear-gradient(90deg, rgba(34,211,238,.45), var(--cyan-soft) 50%, rgba(34,211,238,.45));
+    box-shadow: 0 0 10px rgba(34,211,238,.8);
+    animation: dashflare 7s linear infinite; }
+  /* camera-flash: the dash catches the traveling light head-on and reflects it
+     out — fast attack at the crossing, white-hot bloom, smooth decay */
+  @keyframes dashflare {
+    0%, 26.5% { filter: brightness(1); transform: translateY(-1px) scale(1);
+              box-shadow: 0 0 10px rgba(34,211,238,.8); }
+    29%     { filter: brightness(4.5); transform: translateY(-1px) scale(1.45, 3.6);
+              box-shadow: 0 0 4px rgba(255,255,255,1), 0 0 14px rgba(255,255,255,.95),
+                          0 0 34px rgba(163,244,252,1), 0 0 75px rgba(34,211,238,1),
+                          0 0 130px rgba(34,211,238,.6); }
+    33%     { filter: brightness(2); transform: translateY(-1px) scale(1.12, 1.7);
+              box-shadow: 0 0 10px rgba(255,255,255,.7), 0 0 22px rgba(103,232,249,1),
+                          0 0 44px rgba(34,211,238,.7); }
+    40%, 100% { filter: brightness(1); transform: translateY(-1px) scale(1);
+              box-shadow: 0 0 10px rgba(34,211,238,.8); }
+  }
+  /* the pulse that sweeps through the letters and relights the dash */
+  .brand .bpulse { position: absolute; top: 50%; left: -14%; width: 34px; height: 1.5px;
+    transform: translateY(-1px); border-radius: 1px; z-index: -1; opacity: 0;
+    background: linear-gradient(90deg, transparent, var(--cyan-soft));
+    filter: drop-shadow(0 0 5px rgba(34,211,238,.9));
+    animation: brandpulse 7s linear infinite; }
+  @keyframes brandpulse {
+    0%        { left: -14%; opacity: 0; }
+    5%        { opacity: .35; }
+    26%       { opacity: .35; }
+    29%       { opacity: 1; }
+    33%       { opacity: .35; }
+    88%       { opacity: .35; }
+    94%, 100% { left: 114%; opacity: 0; }
+  }
+  nav .links { display: flex; gap: 1.1rem; font-size: .8rem; letter-spacing: .06em; }
+  nav .links a { color: var(--dim); position: relative; white-space: nowrap; }
+  nav .btn { white-space: nowrap; padding: .55rem .95rem; }
+  @media (max-width: 1120px) {
+    nav .links { gap: .7rem; font-size: .74rem; }
+    nav .btn-ghost { display: none; }
+  }
+  @media (max-width: 940px) {
+    nav .links { display: none; }
+  }
+  nav .links a::after { content: ""; position: absolute; left: 0; bottom: -4px; height: 1px;
+    width: 100%; background: var(--cyan); transform: scaleX(0); transform-origin: left;
+    transition: transform .25s ease; }
+  nav .links a:hover { color: var(--cyan-soft); }
+  nav .links a:hover::after { transform: scaleX(1); }
+  .btn { display: inline-block; padding: .62rem 1.25rem; border-radius: 8px; font-size: .85rem;
+         letter-spacing: .05em; font-weight: 600; transition: all .2s ease; position: relative;
+         overflow: hidden; }
+  .btn-solid { background: linear-gradient(135deg, #0e7490, #0891b2); color: #eaffff;
+               box-shadow: 0 0 24px rgba(34,211,238,.18); }
+  .btn-solid::before { content: ""; position: absolute; top: 0; left: -80%; width: 50%; height: 100%;
+    background: linear-gradient(105deg, transparent, rgba(255,255,255,.25), transparent);
+    transform: skewX(-20deg); transition: left .6s ease; }
+  .btn-solid:hover::before { left: 130%; }
+  .btn-solid:hover { box-shadow: 0 0 40px rgba(34,211,238,.45); transform: translateY(-2px); }
+  .btn-ghost { border: 1px solid #1d3a4d; color: var(--cyan-soft); }
+  .btn-ghost:hover { border-color: var(--cyan); background: rgba(34,211,238,.06);
+                     box-shadow: 0 0 20px rgba(34,211,238,.15); }
+
+  /* ---------- hero ---------- */
+  header.hero { position: relative; padding: 6.5rem 0 5rem; overflow: hidden; }
+  .hero-grid { position: absolute; inset: 0; opacity: .5;
+    background-image: linear-gradient(var(--line) 1px, transparent 1px),
+                      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 75% 65% at 50% 35%, #000 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse 75% 65% at 50% 35%, #000 30%, transparent 75%); }
+  #fx { position: absolute; inset: 0; width: 100%; height: 100%;
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 35%, transparent 80%);
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 35%, transparent 80%); }
+  .hero .wrap { position: relative; text-align: center; }
+  .hero .wrap::before { content: ""; position: absolute; top: -5rem; left: 50%;
+    transform: translateX(-50%); width: 920px; max-width: 96vw; height: 500px; z-index: -1;
+    background: radial-gradient(50% 52% at 50% 42%, rgba(34,211,238,.09), transparent 70%);
+    pointer-events: none; }
+  .kicker { display: inline-block; font-size: .72rem; letter-spacing: .26em; text-transform: uppercase;
+            color: var(--cyan); border: 1px solid #14404f; padding: .4rem 1rem; border-radius: 999px;
+            background: rgba(34,211,238,.05); margin-bottom: 1.6rem;
+            box-shadow: 0 0 20px rgba(34,211,238,.1) inset; }
+  h1 { font-size: clamp(2rem, 4.8vw, 3.25rem); line-height: 1.1; margin: 0 0 1.2rem;
+       letter-spacing: -.02em; font-weight: 700; text-wrap: balance; }
+  h1 .glow { background: linear-gradient(92deg, var(--cyan-soft), #e0fbff 30%, var(--cyan) 55%, var(--cyan-soft) 80%);
+             background-size: 220% 100%; -webkit-background-clip: text; background-clip: text;
+             color: transparent; animation: shimmer 7s linear infinite; }
+  @keyframes shimmer { to { background-position: -220% 0; } }
+  .sub { max-width: 760px; margin: 0 auto 2.2rem; color: var(--dim); font-size: 1.08rem; }
+  .cta-row { display: flex; gap: .9rem; justify-content: center; flex-wrap: wrap; }
+
+  /* hero entrance choreography */
+  .h-in { opacity: 0; transform: translateY(26px); filter: blur(6px);
+          transition: opacity .8s ease, transform .8s cubic-bezier(.2,.7,.2,1), filter .8s ease; }
+  body.loaded .h-in { opacity: 1; transform: none; filter: none; }
+  body.loaded .h-in.d1 { transition-delay: .1s; }
+  body.loaded .h-in.d2 { transition-delay: .25s; }
+  body.loaded .h-in.d3 { transition-delay: .4s; }
+  body.loaded .h-in.d4 { transition-delay: .55s; }
+  body.loaded .h-in.d5 { transition-delay: .75s; }
+
+  /* animated schematic */
+  .schematic { margin: 3.5rem auto 0; max-width: 860px; display: block; }
+  .schematic .wire { stroke: #16323f; stroke-width: 2; fill: none; }
+  .schematic .trace { stroke: var(--cyan); stroke-width: 2.5; fill: none;
+    stroke-dasharray: 1200; stroke-dashoffset: 1200; filter: drop-shadow(0 0 6px rgba(34,211,238,.7));
+    animation: dash 9s ease-in-out infinite; }
+  .schematic .trace2 { stroke: var(--amber); stroke-width: 2; fill: none; opacity: .85;
+    stroke-dasharray: 900; stroke-dashoffset: 900; filter: drop-shadow(0 0 5px rgba(251,191,36,.6));
+    animation: dash2 9s ease-in-out infinite; }
+  .schematic .spark { fill: #d9fbff; filter: drop-shadow(0 0 7px rgba(34,211,238,1)); }
+  @keyframes dash { 8% { stroke-dashoffset: 1200; } 42% { stroke-dashoffset: 0; }
+                    88% { stroke-dashoffset: 0; opacity: 1; } 96%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+  @keyframes dash2 { 0%, 30% { stroke-dashoffset: 900; } 62% { stroke-dashoffset: 0; }
+                     88% { stroke-dashoffset: 0; opacity: .85; } 96%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+  .schematic .node { fill: #0d1a24; stroke: #1d4456; stroke-width: 1.5; }
+  .schematic .node-hot { animation: nodepulse 9s ease-in-out infinite; }
+  @keyframes nodepulse { 0%, 30% { fill: #0d1a24; stroke: #1d4456; }
+    45%, 85% { fill: rgba(34,211,238,.25); stroke: var(--cyan); } 100% { fill: #0d1a24; } }
+  .schematic text { font-family: "IBM Plex Mono", ui-monospace, "Cascadia Code", monospace; font-size: 11px;
+                    fill: var(--dimmer); letter-spacing: .08em; }
+  .schematic .lbl-hot { animation: lblpulse 9s ease-in-out infinite; }
+  @keyframes lblpulse { 0%, 30% { fill: var(--dimmer); } 45%, 85% { fill: var(--cyan-soft); } 100% { fill: var(--dimmer); } }
+
+  /* ---------- sections & reveal ---------- */
+  section { padding: 5rem 0; position: relative; z-index: 1; }
+  /* soft gradient seams instead of full-bleed hairlines */
+  section::after { content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line) 22%, #1d4456 50%,
+                var(--line) 78%, transparent); }
+  /* tonal bands + light moments on the sections that earn them */
+  #problem, #platform, #proof {
+    background: linear-gradient(180deg, rgba(16,26,40,.55), rgba(10,18,27,0) 72%); }
+  #line { background: radial-gradient(58% 62% at 50% 34%, rgba(34,211,238,.055), transparent 72%); }
+  #contact { position: relative;
+    background: radial-gradient(62% 58% at 50% 40%, rgba(34,211,238,.075), transparent 74%); }
+  #contact::before { content: ""; position: absolute; inset: 0; opacity: .45; pointer-events: none;
+    background-image: linear-gradient(var(--line) 1px, transparent 1px),
+                      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 72% 62% at 50% 44%, #000 22%, transparent 74%);
+    -webkit-mask-image: radial-gradient(ellipse 72% 62% at 50% 44%, #000 22%, transparent 74%); }
+  #contact .wrap { position: relative; }
+  .rv { opacity: 0; transform: translateY(34px); filter: blur(5px);
+        transition: opacity .9s ease, transform .9s cubic-bezier(.2,.7,.2,1), filter .9s ease; }
+  .rv.in { opacity: 1; transform: none; filter: none; }
+  .stagger > * { opacity: 0; transform: translateY(26px);
+        transition: opacity .7s ease, transform .7s cubic-bezier(.2,.7,.2,1); }
+  .stagger.in > * { opacity: 1; transform: none; }
+  .stagger.in > *:nth-child(1) { transition-delay: .05s; }
+  .stagger.in > *:nth-child(2) { transition-delay: .15s; }
+  .stagger.in > *:nth-child(3) { transition-delay: .25s; }
+  .stagger.in > *:nth-child(4) { transition-delay: .35s; }
+  .stagger.in > *:nth-child(5) { transition-delay: .45s; }
+  .stagger.in > *:nth-child(6) { transition-delay: .55s; }
+  .stagger.in > *:nth-child(7) { transition-delay: .65s; }
+  .stagger.in > *:nth-child(8) { transition-delay: .75s; }
+  .stagger.in > *:nth-child(9) { transition-delay: .85s; }
+  .eyebrow { font-size: .7rem; letter-spacing: .22em; text-transform: uppercase; color: var(--cyan);
+             margin-bottom: .8rem; font-weight: 600; }
+  h2 { font-size: clamp(1.5rem, 3.2vw, 2.1rem); margin: 0 0 1rem; letter-spacing: -.01em;
+       position: relative; padding-bottom: .8rem; text-wrap: balance; }
+  h2::after { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: 64px;
+    background: linear-gradient(90deg, var(--cyan), transparent); transform: scaleX(0);
+    transform-origin: left; transition: transform 1s cubic-bezier(.2,.7,.2,1) .3s; }
+  section.in h2::after, .rv.in h2::after { transform: scaleX(1); }
+  .lede { color: var(--body); max-width: 800px; font-size: 1.03rem; }
+
+  /* provenance pillars */
+  .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.1rem;
+             margin-top: 2.4rem; }
+  .pillar { border-left: 2px solid #164e63; padding: .2rem 0 .2rem 1.2rem; position: relative; }
+  .pillar::before { content: ""; position: absolute; left: -2px; top: 0; width: 2px; height: 0;
+    background: var(--cyan); box-shadow: 0 0 10px rgba(34,211,238,.7);
+    transition: height 1.1s cubic-bezier(.2,.7,.2,1) .2s; }
+  .stagger.in .pillar::before { height: 100%; }
+  .pillar h3 { margin: 0 0 .4rem; font-size: 1rem; color: var(--cyan-soft); }
+  .pillar p { margin: 0; color: var(--body); font-size: .93rem; }
+
+  /* screenshot feature */
+  .shot-tilt { perspective: 1400px; margin-top: 2.6rem; }
+  .shot { border: 1px solid #14313f; border-radius: 16px; overflow: hidden;
+          background: #05080c;
+          box-shadow: 0 0 0 .5px rgba(255,255,255,.07), inset 0 1px 0 rgba(255,255,255,.06),
+                      0 20px 70px rgba(0,0,0,.5), 0 0 40px rgba(34,211,238,.06);
+          transform-style: preserve-3d; transition: transform .25s ease, box-shadow .35s ease;
+          position: relative; }
+  .shot:hover { box-shadow: 0 0 0 .5px rgba(255,255,255,.08), inset 0 1px 0 rgba(255,255,255,.07),
+                            0 30px 90px rgba(0,0,0,.6), 0 0 70px rgba(34,211,238,.14); }
+  .shot .img-wrap { position: relative; overflow: hidden; }
+  .shot img { display: block; width: 100%; height: auto; transform: scale(1.02);
+              animation: kenburns 24s ease-in-out infinite alternate; }
+  @keyframes kenburns { from { transform: scale(1.02) translateY(0); }
+                        to { transform: scale(1.07) translateY(-1.2%); } }
+  .shot .scan { position: absolute; left: 0; right: 0; top: -18%; height: 16%;
+    background: linear-gradient(180deg, transparent, rgba(34,211,238,.09), transparent);
+    animation: scan 7s ease-in-out infinite; pointer-events: none; }
+  @keyframes scan { 0% { top: -18%; } 55%, 100% { top: 110%; } }
+  .shot-cap { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+              padding: .8rem 1.2rem; border-top: 1px solid var(--line); color: var(--dim);
+              font-size: .8rem; align-items: center; }
+  .shot-cap code { font-family: "IBM Plex Mono", ui-monospace, monospace; color: var(--dimmer); }
+  .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--cyan); margin-right: .5rem; vertical-align: 1px;
+    box-shadow: 0 0 0 0 rgba(34,211,238,.55); animation: ping 2.2s ease-out infinite; }
+  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(34,211,238,.55); }
+                    70%, 100% { box-shadow: 0 0 0 9px rgba(34,211,238,0); } }
+
+  /* two-up studio gallery */
+  .shots2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-top: 2.6rem; }
+  .shots2 .shot img { animation: none; transform: none; }
+  .shots2 .shot-cap { font-size: .78rem; }
+  @media (max-width: 760px) { .shots2 { grid-template-columns: 1fr; } }
+
+  /* gap closer line */
+  .gap-closer { margin-top: 2.2rem; padding: 1.4rem 1.6rem; border: 1px solid #1a3a4c;
+    border-radius: 14px; background: linear-gradient(160deg, #101c2a, #0d1622);
+    color: #a9bfd0; font-size: 1rem; }
+  .gap-closer strong { color: var(--cyan-soft); }
+  .lede strong { color: var(--ink); }
+
+  /* the gap billboard */
+  .gap-big { font-size: clamp(1.35rem, 2.9vw, 2.15rem); font-weight: 700; line-height: 1.4;
+    letter-spacing: -.01em; color: var(--ink); max-width: 980px; margin: 0; }
+  .gap-big em { font-style: normal; color: var(--cyan-soft);
+    text-shadow: 0 0 18px rgba(34,211,238,.35); }
+  .gap-punch { margin: 1.4rem 0 0; font-size: clamp(1.05rem, 1.6vw, 1.25rem); font-weight: 700;
+    color: var(--cyan); letter-spacing: .02em; }
+  .shots3 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-top: 2.8rem; }
+  .shots3 .wide { grid-column: 1 / -1; }
+  .shots3 .shot img { animation: none; transform: none; }
+  .shots3 .shot-cap { font-size: .78rem; }
+  @media (max-width: 760px) { .shots3 { grid-template-columns: 1fr; } }
+
+  /* problem */
+  .problem-stat { display: flex; gap: 2.5rem; flex-wrap: wrap; margin-top: 2.5rem; }
+  .stat { flex: 1 1 220px; border-left: 2px solid #164e63; padding-left: 1.2rem; }
+  .stat b { display: block; font-size: 1.9rem; color: var(--cyan-soft); font-weight: 700; }
+  .stat span { color: var(--dim); font-size: .92rem; }
+
+  /* cards (worlds + tour) */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.1rem;
+           margin-top: 2.4rem; }
+  .card { background: linear-gradient(160deg, var(--panel), var(--bg2)); border: 1px solid var(--line);
+          border-radius: 14px; padding: 1.5rem 1.4rem; position: relative; overflow: hidden;
+          box-shadow: var(--elev1);
+          transition: border-color .25s, transform .25s, box-shadow .25s; }
+  .card::before { content: ""; position: absolute; inset: 0;
+    background: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%),
+      rgba(34,211,238,.08), transparent 45%);
+    opacity: 0; transition: opacity .3s; pointer-events: none; }
+  .card:hover::before { opacity: 1; }
+  .card:hover { border-color: #1d4456; transform: translateY(-4px);
+                box-shadow: 0 0 0 .5px rgba(255,255,255,.06), inset 0 1px 0 rgba(255,255,255,.06),
+                            0 14px 40px rgba(0,0,0,.4); }
+  .card h3 { margin: 0 0 .25rem; font-size: 1.02rem; color: var(--ink); }
+  .card .tag { font-size: .72rem; letter-spacing: .18em; text-transform: uppercase; color: var(--amber);
+               margin-bottom: .7rem; }
+  .card .tag.cy { color: var(--cyan); }
+  .card p { margin: 0; color: var(--body); font-size: .93rem; }
+
+  /* how it works */
+  .steps { counter-reset: step; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+           gap: 1.1rem; margin-top: 2.4rem; }
+  .step { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+          padding: 1.6rem 1.4rem 1.4rem; box-shadow: var(--elev1);
+          transition: border-color .25s, transform .25s; }
+  .step:hover { border-color: #1d4456; transform: translateY(-3px); }
+  .step::before { counter-increment: step; content: "0" counter(step);
+    position: absolute; top: -0.85rem; left: 1.1rem; font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .8rem; color: var(--cyan); background: var(--bg); border: 1px solid #164e63;
+    padding: .15rem .55rem; border-radius: 6px; letter-spacing: .1em; }
+  .step h3 { margin: .2rem 0 .5rem; font-size: 1rem; }
+  .step p { margin: 0; color: var(--body); font-size: .91rem; }
+
+  /* trace demo strip — animated query */
+  .trace-strip { margin-top: 2.6rem; background: var(--panel); border: 1px solid #1d4456;
+                 border-radius: 14px; padding: 1.4rem 1.6rem; overflow: hidden;
+                 box-shadow: var(--elev3), 0 0 44px rgba(34,211,238,.08); }
+  .trace-strip .hops { white-space: nowrap; overflow-x: auto;
+    padding-bottom: .45rem; scrollbar-width: thin; scrollbar-color: #1d4456 transparent;
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 40px), transparent);
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 40px), transparent); }
+  .trace-strip .hops::-webkit-scrollbar { height: 4px; }
+  .trace-strip .hops::-webkit-scrollbar-thumb { background: #1d4456; border-radius: 2px; }
+  .trace-strip .hops::-webkit-scrollbar-track { background: transparent; }
+  .trace-strip code { font-family: "IBM Plex Mono", ui-monospace, "Cascadia Code", monospace; font-size: .82rem;
+                      color: var(--dimmer); white-space: nowrap; padding: .18rem .38rem;
+                      border-radius: 6px; border: 1px solid transparent; transition: all .35s ease; }
+  .trace-strip code.lit { color: var(--cyan-soft); border-color: #1d4456;
+                          background: rgba(34,211,238,.07); text-shadow: 0 0 12px rgba(34,211,238,.45); }
+  .trace-strip .arrow { color: var(--dimmer); padding: 0 .26rem; opacity: .4; transition: opacity .35s; }
+  .trace-strip .arrow.lit { opacity: 1; color: var(--cyan); }
+  .trace-strip .note { color: var(--dim); font-size: .82rem; margin-top: .8rem; white-space: normal; }
+
+  /* methods */
+  .methods { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.1rem;
+             margin-top: 2.4rem; }
+  .method { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+            padding: 1.4rem 1.3rem; box-shadow: var(--elev1);
+            transition: border-color .25s, transform .25s; }
+  .method:hover { border-color: #1d4456; transform: translateY(-3px); }
+  .method h3 { margin: 0 0 .45rem; font-size: .95rem; color: var(--cyan-soft);
+               font-family: "IBM Plex Mono", ui-monospace, monospace; letter-spacing: .04em; }
+  .method p { margin: 0; color: var(--body); font-size: .89rem; }
+
+  /* numbers */
+  .numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1.1rem;
+             margin-top: 2.4rem; }
+  .num { text-align: center; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+         padding: 1.5rem 1rem; box-shadow: var(--elev1);
+         transition: border-color .25s, transform .25s; }
+  .num:hover { border-color: #1d4456; transform: translateY(-3px); }
+  .num b { display: block; font-size: 1.7rem; color: var(--cyan-soft); font-weight: 700;
+           letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+  .num span { color: var(--dim); font-size: .82rem; }
+
+  /* origin — the founder pull-quote gets its own silhouette, not another card */
+  .origin { background: linear-gradient(160deg, #101c2a, #0d1622); border: 1px solid #1a3a4c;
+            border-radius: 0 16px 16px 0; padding: 2.6rem 2.4rem 2.2rem 2.6rem; margin-top: 2.4rem;
+            position: relative; overflow: hidden; box-shadow: var(--elev2); }
+  .origin::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, var(--cyan), rgba(34,211,238,.05)); }
+  .origin::before { content: "\201C"; position: absolute; top: -1.2rem; left: .9rem;
+    font-size: 9rem; color: rgba(34,211,238,.12); font-family: Georgia, serif; }
+  .origin p { margin: 0; color: #b6c9d9; font-size: 1.16rem; line-height: 1.72;
+              max-width: 820px; position: relative; }
+  .origin .sig { margin-top: 1.3rem; padding-top: 1rem; color: var(--dimmer); font-size: .85rem;
+                 letter-spacing: .06em; border-top: 1px solid rgba(27,45,63,.8); }
+
+  /* feature band — the full-width component for content that outranks a grid cell */
+  .feature-band { margin-top: 1.1rem; padding: 1.7rem 1.9rem;
+    background: linear-gradient(120deg, rgba(17,28,41,.95), rgba(13,22,34,.85));
+    border: 1px solid var(--line);
+    border-radius: 0 14px 14px 0; box-shadow: var(--elev2); position: relative; overflow: hidden; }
+  .feature-band::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, var(--cyan), rgba(34,211,238,.06)); }
+  .feature-band .tag { font-size: .72rem; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--cyan); margin-bottom: .55rem; font-weight: 600; }
+  .feature-band h3 { margin: 0 0 .35rem; font-size: 1.12rem; color: var(--ink); }
+  .feature-band p { margin: 0; color: var(--body); font-size: .97rem; max-width: 900px; }
+
+  /* outcome band — proof claims that are not counts and must not wear number tiles */
+  .band-claim { margin-top: 1.1rem; padding: 1.35rem 1.7rem; display: flex; align-items: baseline;
+    gap: 1.4rem; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; box-shadow: var(--elev2); }
+  .band-claim b { font-size: 1.45rem; color: var(--cyan-soft); font-weight: 700;
+    letter-spacing: -.01em; white-space: nowrap; }
+  .band-claim span { color: var(--body); font-size: .95rem; flex: 1 1 380px; }
+
+  /* resolved grid math — tablets get 2-up, wide screens the full row; never
+     leaks into the mobile rails */
+  @media (min-width: 761px) {
+    #problem .cards, #platform .cards { grid-template-columns: repeat(2, 1fr); }
+    #laws .cards { grid-template-columns: repeat(2, 1fr); }
+    .methods { grid-template-columns: repeat(2, 1fr); }
+    .numbers { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (min-width: 1021px) {
+    #problem .cards, #platform .cards { grid-template-columns: repeat(4, 1fr); }
+    .methods { grid-template-columns: repeat(3, 1fr); }
+  }
+
+  /* waitlist form */
+  .wl { max-width: 520px; margin: 0 auto; display: grid; gap: .7rem; text-align: left; }
+  .wl input { width: 100%; background: var(--panel); border: 1px solid #1d3a4d; border-radius: 8px;
+              color: var(--ink); padding: .7rem .9rem; font-size: .92rem; font-family: inherit;
+              transition: border-color .25s, box-shadow .25s; }
+  .wl input::placeholder { color: var(--dimmer); }
+  .wl input:focus { outline: none; border-color: var(--cyan);
+                    box-shadow: 0 0 0 3px rgba(34,211,238,.12); }
+  .wl .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+  .wl button { cursor: pointer; border: none; font-family: inherit; }
+  .wl .hp { position: absolute; left: -9999px; opacity: 0; height: 0; }
+  .wl-msg { min-height: 1.4rem; font-size: .88rem; text-align: center; }
+  .wl-msg.ok { color: #4ade80; }
+  .wl-msg.err { color: #f87171; }
+  .wl-note { margin: .1rem 0 0; color: var(--dimmer); font-size: .8rem; text-align: center; }
+  @media (max-width: 520px) { .wl .row2 { grid-template-columns: 1fr; } }
+
+  /* footer cta */
+  .final { text-align: center; padding: 5.5rem 0 6rem; }
+  .final h2 { font-size: clamp(1.6rem, 3.6vw, 2.4rem); padding-bottom: 0; }
+  .final h2::after { display: none; }
+  .final .btn-solid { animation: breathe 3.2s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { box-shadow: 0 0 24px rgba(34,211,238,.18); }
+                       50% { box-shadow: 0 0 44px rgba(34,211,238,.4); } }
+  footer { border-top: 1px solid var(--line); padding: 1.6rem 0 2.2rem; color: var(--dimmer);
+           font-size: .78rem; position: relative; z-index: 1; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+
+  @media (max-width: 640px) {
+    nav .links { display: none; }
+    nav .wrap { padding: 0 1rem; }
+    .brand { font-size: .6rem; letter-spacing: .16em; white-space: nowrap; }
+    .brand .bdash { width: 1.1em; margin: 0 .18em 0 .05em; }
+    nav .btn { padding: .45rem .8rem; font-size: .76rem; white-space: nowrap; }
+    nav .btn-ghost { display: none; }
+    header.hero { padding-top: 4.5rem; }
+  }
+
+  /* ---------- mobile: swipe rails instead of endless stacking ---------- */
+  @media (max-width: 760px) {
+    section { padding: 2.8rem 0; }
+    header.hero { padding: 3.1rem 0 2.3rem; }
+    .schematic { margin-top: 1.4rem; }
+    .sub { font-size: .96rem; margin-bottom: 1.7rem; }
+    h1 { font-size: 1.78rem; }
+    .lede { font-size: .95rem; }
+    .kicker { margin-bottom: 1.1rem; }
+    .feature-band { padding: 1.3rem 1.2rem; }
+    .band-claim { padding: 1.1rem 1.2rem; gap: .5rem 1rem; }
+    .band-claim b { font-size: 1.25rem; }
+    .origin p { font-size: 1.04rem; }
+
+    /* card grids and galleries become horizontal snap rails */
+    .cards, .steps, .methods, .pillars, .shots2, .shots3 {
+      display: grid; grid-auto-flow: column; grid-auto-columns: 84%;
+      grid-template-columns: none; overflow-x: auto; overflow-y: hidden;
+      scroll-snap-type: x mandatory; overscroll-behavior-x: contain;
+      gap: .9rem; margin-left: -1.5rem; margin-right: -1.5rem;
+      padding: .2rem 1.5rem .8rem; scrollbar-width: none;
+    }
+    .cards::-webkit-scrollbar, .steps::-webkit-scrollbar, .methods::-webkit-scrollbar,
+    .pillars::-webkit-scrollbar, .shots2::-webkit-scrollbar, .shots3::-webkit-scrollbar
+      { display: none; }
+    .cards > *, .steps > *, .methods > *, .pillars > *, .shots2 > *, .shots3 > *
+      { scroll-snap-align: center; }
+    /* cards size to their own content in the rails — no stretched empty bottoms */
+    .cards, .steps, .methods, .pillars { align-items: start; }
+    /* soften the viewport guillotine: content fades at the rail edge instead of
+       being sliced raw by the screen */
+    .cards, .steps, .methods, .pillars, .shots2, .shots3 {
+      mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent);
+      -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent);
+    }
+    .shots2, .shots3 { grid-auto-columns: 88%; }
+    .shots3 .wide { grid-column: auto; }
+
+    /* pillars need visible bounds as slides */
+    .pillar { background: var(--panel); border: 1px solid var(--line);
+      border-left: 2px solid #164e63; border-radius: 12px; padding: 1.1rem 1.1rem 1.1rem 1.2rem; }
+
+    /* number tiles: compact two-up grid, not a stack */
+    .numbers { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+    .num { padding: 1.1rem .7rem; }
+    .num b { font-size: 1.35rem; }
+    .num span { font-size: .74rem; }
+
+    .problem-stat { gap: 1.3rem; margin-top: 2rem; }
+    .origin { padding: 1.6rem 1.3rem; }
+    .gap-closer { padding: 1.1rem 1.2rem; font-size: .92rem; }
+    .trace-strip { padding: 1.1rem 1.2rem; }
+  }
+
+  /* ---------- reduced motion: calm everything ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .h-in, .rv, .stagger > * { opacity: 1 !important; transform: none !important; filter: none !important; }
+    .pillar::before { height: 100% !important; }
+    h2::after { transform: scaleX(1) !important; }
+    #fx, .aurora { display: none; }
+    .trace-strip code, .trace-strip .arrow { color: var(--cyan-soft); opacity: 1; }
+    /* show the hero trace in its finished state instead of erasing it */
+    .schematic .trace, .schematic .trace2 { stroke-dashoffset: 0 !important; opacity: 1 !important; }
+    .schematic .node-hot { fill: rgba(34,211,238,.25) !important; stroke: var(--cyan) !important; }
+    .schematic .lbl-hot { fill: var(--cyan-soft) !important; }
+    .schematic .spark { display: none; }
+    .brand .bpulse { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+<div id="progress" aria-hidden="true"></div>
+
+<nav id="nav">
+  <div class="wrap">
+    <div class="brand" aria-label="Atlas-Platform">A T L A S<b class="bdash" aria-hidden="true"></b>P L A T F O R M<i class="bpulse" aria-hidden="true"></i></div>
+    <div class="links">
+      <a href="#provenance">Provenance</a>
+      <a href="#graph">3D graph</a>
+      <a href="#platform">The platform</a>
+      <a href="#methods">Methods</a>
+      <a href="#arc">Arc</a>
+      <a href="#laws">The laws</a>
+    </div>
+    <div style="display:flex; gap:.6rem; align-items:center">
+      <a class="btn btn-ghost" href="https://atlas-platform.cloud/platform">Platform login</a>
+      <a class="btn btn-solid" href="#contact">Request early access</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="hero-grid"></div>
+  <canvas id="fx" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <span class="kicker h-in">Document · Data · Digital Twin</span>
+    <h1><span class="h-in d1" style="display:block">Turn your machine documentation into data</span>
+        <span class="glow h-in d2" style="display:block">that answers which breaker, which wire, which page, which spare — in seconds.</span></h1>
+    <p class="sub h-in d3">Atlas-Platform ingests your machines' PDFs and builds
+      <strong>a digital twin of your documentation — and through it, your machine</strong>. Every
+      component, wire, and row carries the coordinates of the ink it came from. Ask about your
+      machine and it answers the way a database does: in seconds, with the source cited.</p>
+    <div class="cta-row h-in d4">
+      <a class="btn btn-solid" href="#contact">Request early access</a>
+      <a class="btn btn-ghost" href="#graph">See the 3D graph</a>
+    </div>
+
+    <svg class="schematic h-in d5" viewBox="0 0 860 190" xmlns="http://www.w3.org/2000/svg" aria-label="Animated fault trace across a schematic">
+      <path class="wire" d="M20 40 H840"/>
+      <path class="wire" d="M20 80 H840"/>
+      <path class="wire" d="M20 120 H840"/>
+      <path class="wire" d="M120 40 V120"/>
+      <path class="wire" d="M420 80 V160 H700"/>
+      <path class="wire" d="M600 40 V80"/>
+      <path class="trace2" d="M258 54 V120 H60"/>
+      <path class="trace" id="tracePath" d="M60 120 H120 V40 H420 V80 H600 V80 H760"/>
+      <circle class="spark" r="3.5">
+        <animateMotion dur="9s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.08;0.42;1" calcMode="linear">
+          <mpath href="#tracePath"/>
+        </animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.08;0.12;0.4;0.45;1" dur="9s" repeatCount="indefinite"/>
+      </circle>
+      <rect class="node node-hot" x="40" y="104" width="40" height="32" rx="4"/>
+      <rect class="node node-hot" x="400" y="64" width="40" height="32" rx="4"/>
+      <rect class="node node-hot" x="580" y="64" width="40" height="32" rx="4"/>
+      <rect class="node node-hot" x="740" y="64" width="52" height="32" rx="4"/>
+      <rect class="node" x="240" y="24" width="36" height="30" rx="4"/>
+      <rect class="node" x="680" y="146" width="40" height="28" rx="4"/>
+      <text class="lbl-hot" x="36" y="155">SOL-114</text>
+      <text x="236" y="16">CB-40</text>
+      <text class="lbl-hot" x="392" y="115">TB-31 · 14</text>
+      <text class="lbl-hot" x="572" y="52">CAB-71</text>
+      <text class="lbl-hot" x="736" y="52">PLC X0613</text>
+      <text x="676" y="188">SPARE · BIN 5-K</text>
+    </svg>
+  </div>
+</header>
+
+<section id="problem" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">The problem</div>
+    <h2>When your machine goes down,<br>finding why shouldn't take longer than the repair.</h2>
+    <p class="lede">A tripped breaker, a dead solenoid, a limit switch that stopped reading — once
+      found, fixes like these take minutes. What takes the hour is the hunt: <em>which</em> breaker,
+      <em>which</em> wire number, <em>which</em> page of <em>which</em> manual, and is there a spare
+      on the shelf. The knowledge
+      exists — trapped in thousands of pages of scanned schematics, cable lists, terminal-box drawings,
+      and parts catalogs that only your most senior people can navigate. <strong>Every retirement takes
+      that navigation skill out the door.</strong></p>
+    <div class="problem-stat stagger">
+      <div class="stat"><b>Most of MTTR</b><span>is diagnosis — and most of diagnosis is documentation
+        search, not wrench time.</span></div>
+      <div class="stat"><b>1,000s of pages</b><span>per machine: schematics, wiring diagrams, cable
+        lists, PLC references — often bilingual, always cross-referenced by convention.</span></div>
+      <div class="stat"><b>Zero tools</b><span>serve the 2 AM moment. CAD serves design. CMMS serves
+        work orders. Document management serves storage. Nobody serves the <em>answer</em>.</span></div>
+    </div>
+
+    <div class="cards stagger">
+      <div class="card">
+        <div class="tag">CAD &amp; EDA</div>
+        <h3>Serves design, not diagnosis</h3>
+        <p>CAD understands drawings it authored — native files, current revisions. A twenty-year-old
+          machine arrives as scanned paper: no source files, no symbol library, no way in. Redrawing
+          a 200-sheet schematic by hand is months of error-prone work nobody budgets.</p>
+      </div>
+      <div class="card">
+        <div class="tag">Document management</div>
+        <h3>Serves storage</h3>
+        <p>DMS and PDM systems file the PDF, version it, and find it by name — some even search the
+          text inside. What none of them do is turn what's inside into structured, queryable data.
+          The question that matters at a dead panel is not a document search.</p>
+      </div>
+      <div class="card">
+        <div class="tag">CMMS / EAM</div>
+        <h3>Serves the work order</h3>
+        <p>Maintenance systems record that a repair happened, who did it, and what it cost. The
+          diagnostic knowledge — which breaker, which wire, which page — lives outside the system,
+          in binders and in the heads of people who retire.</p>
+      </div>
+      <div class="card">
+        <div class="tag">Generic AI doc tools</div>
+        <h3>Serve summaries</h3>
+        <p>Chat-with-your-PDF produces text <em>about</em> documents — unanchored, re-read from
+          scratch on every question, and prone to choking on dense engineering schematics. An answer
+          without a source page is a liability at a live panel.</p>
+      </div>
+    </div>
+
+    <div class="gap-closer rv">Four adjacent tools, four different masters — and none of them turns
+      what's printed into data. <strong>That gap is the product.</strong></div>
+  </div>
+</section>
+
+<section id="gap" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">The gap</div>
+    <p class="gap-big">No software ingests the hundreds of legacy PDFs behind your production line
+      and outputs <em>Certified relational data</em>, <em>a queryable graph</em>, and
+      <em>a 3D reconstruction</em> — with every fact traceable to the mark it was printed on.</p>
+    <p class="gap-punch">Atlas-Platform is built to be that software.</p>
+
+    <div class="shots3 stagger">
+      <div class="shot wide">
+        <div class="img-wrap">
+          <img src="assets/gap-extraction.png?v=1" alt="Document extraction workbench: three draft tables — terminal boxes, connections, components — with live rows extracted from a wiring document, each awaiting human certification" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Relational data — a terminal-box document becoming
+            three draft tables: a thousand-plus connection rows extracted, every table waiting on a human's
+            Certify.</span>
+        </div>
+      </div>
+      <div class="shot">
+        <div class="img-wrap">
+          <img src="assets/gap-schema.png?v=1" alt="Relations board: ten extraction-table cards wired field-to-field with glowing join edges and live match-rate pills" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>The queryable graph — every extracted document becomes
+            tables on the board, wired to the others by the identifiers the pages already print,
+            with live match-rates.</span>
+        </div>
+      </div>
+      <div class="shot">
+        <div class="img-wrap">
+          <img src="assets/gap-3d.png?v=1" alt="3D machine graph: three schematic sheets auto-assembled in dark space, continuation conductors riding harness-routed ribbons between them" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>The 3D reconstruction — three sheets re-assembled from
+            the data alone, continuations riding the harness.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="provenance" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">The core idea</div>
+    <h2>Extraction with provenance so complete,<br>the data can redraw the drawing.</h2>
+    <p class="lede">Most "AI reads your PDFs" tools produce summaries — text about the document.
+      Atlas-Platform produces <em>the document's contents as structured data</em>: every component,
+      terminal, wire, cable, and table row, each anchored to the exact page and position it was
+      printed on. The electrical drawing becomes a graph — components as nodes, terminals as ports,
+      wires as edges — and the fidelity test is unforgiving: if the data couldn't reconstruct the
+      schematic, the extraction isn't done.</p>
+    <div class="pillars stagger">
+      <div class="pillar">
+        <h3>Anchored, not paraphrased</h3>
+        <p>Every extracted fact carries its source: document, page, position. Ask where a value came
+          from and the answer is a place on a drawing, not a model's recollection.</p>
+      </div>
+      <div class="pillar">
+        <h3>The drawing stays the authority</h3>
+        <p>Source PDFs are sealed evidence — never altered, never redrawn. The structured layer sits
+          on top of the original print, so every claim remains checkable against it forever.</p>
+      </div>
+      <div class="pillar">
+        <h3>Reconstruction as proof</h3>
+        <p>Because the graph preserves geometry and connectivity, the schematic can be rebuilt from
+          the data alone. That round trip — paper to data to drawing — is the fidelity standard the
+          whole platform is held to.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="graph" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">See the whole document at once</div>
+    <h2>The machine's schematic, assembled in one 3D space</h2>
+    <p class="lede">The machine graph renders annotated sheets as a single navigable scene —
+      every sheet a slab, every component a solid, every conductor colored by its electrical role.
+      Nothing here is a picture — every block and wire is the extracted data itself, re-rendered.
+      The reconstruction proof, live.</p>
+    <p class="lede">The drafter's "continues on sheet 5" callouts resolve into real conductors that arc between
+      sheets, routed like a physical cable harness: parallel wires ride one ribbon, turn at right
+      angles, and steer around the sheets themselves. Grab any sheet and slide it where it connects —
+      the wires follow. The deck grows as sheets are certified; next on the bench, a queried circuit
+      lifts free of the deck and rebuilds in electrical order.</p>
+    <div class="shot-tilt">
+      <div class="shot" id="shot">
+        <div class="img-wrap">
+          <img src="assets/machine-graph.png?v=4sheets" alt="Machine graph: multiple schematic sheets rendered in one 3D space, components as solids, conductors colored by net class, continuation wires arcing between sheets" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Live capture from the platform — four annotated sheets of a 200-plus-sheet schematic, and growing</span>
+          <code>AC phase · DC rail · Earth · Control · Unlabeled</code>
+        </div>
+      </div>
+      <div class="shot" style="margin-top: 1.2rem">
+        <div class="img-wrap">
+          <img src="assets/machine-graph-linked.png?v=1" alt="Machine graph with four sheets auto-assembled side by side, ten continuation conductors routed between them as right-angled harness ribbons through open space" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Cross-sheet continuations, resolved — four sheets
+            auto-assembled, ten conductors riding harness-routed ribbons between them</span>
+          <code>the extension IS the wire</code>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="why" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">Why this shape</div>
+    <h2>Two years of experiments taught us:<br>the answer isn't a bigger model.</h2>
+    <p class="lede">Before Atlas-Platform was software, it was a team of maintenance engineers
+      logging downtime — year after year, machine by machine — and a series of honest experiments
+      in driving it down.</p>
+    <div class="steps stagger">
+      <div class="step">
+        <h3>An AI notebook per line</h3>
+        <p>Feed every manual into an AI notebook and ask it questions. Fine for overviews — but on a
+          specific fault it answered no better than a web search. Depth was the whole point, and it
+          had none.</p>
+      </div>
+      <div class="step">
+        <h3>Cache the whole corpus</h3>
+        <p>Load every page into a frontier model and let it reason per question. The answers were
+          real and factual — and each one took 10–20 minutes and cost as much as re-sending every
+          page image with every question. Right answers, unusable economics.</p>
+      </div>
+      <div class="step">
+        <h3>Extract once, query forever</h3>
+        <p>Move the heavy reasoning to ingestion: extract everything into tables and a graph with
+          provenance, once per document — then compose already-extracted facts at query time.
+          Answers in seconds, quoting their sources. That bet became Atlas-Platform.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="platform" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">The platform</div>
+    <h2>Four surfaces, one engineer, one truth</h2>
+    <p class="lede">Four working surfaces and one resident AI engineer — all running against the
+      same Certified data layer. Build it on one surface, see it on all of them.</p>
+    <div class="cards stagger">
+      <div class="card">
+        <div class="tag cy">Author</div>
+        <h3>Smart Canvas</h3>
+        <p>The platform annotates your schematics and drawings at your direction — components become
+          nodes, wires become edges with their printed labels — extracting the drawing into data
+          that joins with the data from the rest of your machine's documentation. The Smart Canvas
+          is where you view, step through, and edit anything in the annotations, every one anchored
+          to the original print beneath.</p>
+      </div>
+      <div class="card">
+        <div class="tag cy">Extract</div>
+        <h3>Extraction Studio</h3>
+        <p>Tabular documents — cable lists, terminal-box wiring, parts catalogs — become tables
+          that mirror the printed page, row for row. Arc extracts page by page; a human verifies;
+          Certified tables seal read-only with provenance to every row.</p>
+      </div>
+      <div class="card">
+        <div class="tag cy">Visualize</div>
+        <h3>3D Machine Graph</h3>
+        <p>The whole document set in one scene: sheets as slabs, circuits spanning them, conductors
+          colored by net class. The fastest way a human can see how a 200-plus-sheet machine actually
+          hangs together.</p>
+      </div>
+      <div class="card">
+        <div class="tag cy">Relate</div>
+        <h3>Schema &amp; Relations</h3>
+        <p>Documents join each other on the identifiers they already print: wire labels to PLC I/O
+          addresses, cable numbers to terminal boxes, part numbers to inventory. Atlas-Platform
+          describes those joins once and every query after that walks them.</p>
+      </div>
+    </div>
+
+    <div class="feature-band rv">
+      <div class="tag">Assist · Arc, the AI Industrial Engineer</div>
+      <h3>The resident engineer on every surface</h3>
+      <p>Arc reads your pages, drafts your data, and learns your plant's conventions — governed by
+        a rulebook of 260+ codified extraction lessons and a hard boundary: a human certifies, or
+        it isn't truth.</p>
+    </div>
+
+    <div class="shots2 rv">
+      <div class="shot">
+        <div class="img-wrap">
+          <img src="assets/smart-canvas.png?v=2" alt="Smart Canvas: a Certified schematic sheet with its logic-graph overlay — components, terminals, and wires annotated over the original print, Arc's panel docked at right" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Smart Canvas — a Certified sheet. The overlay is the
+            logic graph: components as nodes, terminals as ports, wires as edges, each snapped to
+            the printed geometry beneath.</span>
+        </div>
+      </div>
+      <div class="shot">
+        <div class="img-wrap">
+          <img src="assets/canvas-live.png?v=2" alt="Smart Canvas mid-session: a dense annotated power sheet with its certification badge, and Arc's panel narrating a continuation fix, codifying the lesson, and running the audit clean" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Arc mid-session — a fix applied, the lesson codified
+            for future sessions, the audit read clean, and the founder's reply seals the page. Two
+            pages certified in one exchange.</span>
+        </div>
+      </div>
+      <div class="shot">
+        <div class="img-wrap">
+          <img src="assets/extraction-studio.png?v=2" alt="Extraction Studio: Arc designing a cable-list table live — a tabular document page at left, draft tables with typed columns building below" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Extraction Studio — Arc designing a cable-list
+            table live: columns proposed from the print, the table's schema taking shape below, the
+            whole exchange costing under a dollar.</span>
+        </div>
+      </div>
+      <div class="shot">
+        <div class="img-wrap">
+          <img src="assets/relations.png?v=1" alt="Relations board: four document schema cards — two cable lists, the schematic, a parts list — joined field-to-field by glowing edges through junction pills" loading="lazy">
+          <div class="scan" aria-hidden="true"></div>
+        </div>
+        <div class="shot-cap">
+          <span><span class="live-dot"></span>Relations — documents joined on the identifiers they
+            already print: cable lists, schematic, and parts list wired field-to-field into join
+            contracts.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="line" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">At production-line scale</div>
+    <h2>Ingest the whole line. Query it like a database.</h2>
+    <p class="lede">One machine is the proving ground; the design is for your whole floor. Every one
+      of your machines' schematics, cable lists, terminal boxes, parts catalogs, and PLC references
+      in one queryable digital twin — so a question that spans documents gets answered the way your
+      line was wired, not the way anyone remembers it. Retrieval is <strong>evidence-based</strong>: answers come from
+      extracted, Certified facts with the source page attached. If it isn't printed in the
+      documentation, Atlas-Platform doesn't assert it.</p>
+    <div class="trace-strip" id="tracestrip">
+      <div class="hops"><code>fault: "actuator 2 not returning"</code><span class="arrow">→</span><code>LS-207</code><span class="arrow">→</span><code>wire 7204</code><span class="arrow">→</span><code>CAB-64</code><span class="arrow">→</span><code>TB-24 · slot 22</code><span class="arrow">→</span><code>PLC X0921</code><span class="arrow">→</span><code>spare · bin 5-K</code></div>
+      <div class="note">The shape of a real trace: device → conductor → cable →
+        terminal box → PLC input → shelf. You bring the fault and name the suspect device; from
+        there, every hop is a printed fact with a page number behind it — a documented table or
+        geometry lookup, never model inference, so the answer is auditable line by line. A recent live example: an unlabeled component on a wiring diagram was identified in
+        two queries by searching the corpus text layer — its caption lived on a distant sheet of a
+        different document, and the join agreed with the extraction exactly.</div>
+    </div>
+    <div class="cta-row" style="margin-top:2.4rem">
+      <a class="btn btn-solid" href="#contact">Request early access</a>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">How it works</div>
+    <h2>From paper trail to digital twin</h2>
+    <div class="steps stagger">
+      <div class="step">
+        <h3>Ingest everything</h3>
+        <p>Schematics, cable lists, terminal-box wiring diagrams, parts catalogs, PLC references —
+          native or scanned, English or bilingual. The twin is built from your documents alone —
+          nothing connects to your machines or your control network. The source document is sealed
+          evidence; Atlas-Platform never alters it.</p>
+      </div>
+      <div class="step">
+        <h3>Extract, faithfully</h3>
+        <p>AI extraction at the document's own grain, exactly as printed — governed by codified rules
+          for what a blank cell means, when a table splits, and why a join key is never invented.</p>
+      </div>
+      <div class="step">
+        <h3>Certify with a human</h3>
+        <p>Extraction is verified against the print by a person, then sealed read-only behind an
+          append-only, checksummed archive — tamper-evident: if Certified data ever drifts
+          afterward, an alarm trips. <strong>Certified</strong> is a defined trust tier: every row traceable to its
+          page, every table either human-verified truth or clearly-labeled best-effort.</p>
+      </div>
+      <div class="step">
+        <h3>Query your machine</h3>
+        <p>The result is a relational + graph twin of your machine's electrical reality, exactly
+          as documented. Working today: a mystery designator resolved across the whole corpus in
+          two queries. Next: circuit-trace and find-the-spare — the same Certified data layer,
+          built to answer in seconds, with sources cited.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="methods" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">Under the hood</div>
+    <h2>The right tool for every layer of the page</h2>
+    <p class="lede">Industrial documents are hostile territory: vector CAD exports next to 40-year-old
+      scans, original-language subtitles under mistranslated English headers, conventions that change mid-page.
+      Atlas-Platform layers its methods to match.</p>
+    <div class="methods stagger">
+      <div class="method">
+        <h3>vector &amp; text-layer analysis</h3>
+        <p>Where the PDF carries real geometry, Atlas-Platform reads it directly — text with
+          coordinates, lines as lines. One machine schematic's vector layer alone carries over
+          100,000 printed primitives, each readable as exact geometry: "is this wire on that
+          terminal" becomes arithmetic, not eyeballing.</p>
+      </div>
+      <div class="method">
+        <h3>OCR</h3>
+        <p>Where scans are all that survives, optical recognition brings the text layer back —
+          bilingual by default, matching the reality of decades-old imported machine
+          documentation.</p>
+      </div>
+      <div class="method">
+        <h3>symbol fingerprinting</h3>
+        <p>Pattern recognition over the drawing's native vector geometry — the exact
+          shapes the CAD tool drew, not a scan of them. Label a symbol once and every instance
+          across the drawing set is found, tolerant of rotation and mirroring. In proving runs a
+          single hand-marked example located its siblings across pages in seconds, matching the
+          human's box to within one pixel.</p>
+      </div>
+      <div class="method">
+        <h3>detection models</h3>
+        <p>A vision detector trained on industrial drawings proposes component locations across 55
+          symbol classes. Proposals are evidence with a hard ceiling — they inform Arc and
+          the human, and are structurally barred from gating or blocking any result. A detection
+          means "look here"; the absence of one means nothing.</p>
+      </div>
+      <div class="method">
+        <h3>AI extraction agents</h3>
+        <p>Model-driven readers that work page by page under a codified rulebook of extraction
+          doctrine — 260+ lessons distilled from real extraction sessions and locked in. The
+          model routes and inspects; for recognized document families, deterministic code emits the
+          rows.</p>
+      </div>
+      <div class="method">
+        <h3>relational + graph store</h3>
+        <p>Tables where the document is tabular, a graph where it's a circuit — queryable together,
+          with the joins between documents modeled once and reused by every question.</p>
+      </div>
+    </div>
+
+    <div class="feature-band rv">
+      <div class="tag">human certification</div>
+      <h3>The layer that makes it trustworthy</h3>
+      <p>Page-by-page human verification, sealed tables, and an explicit trust tier on every
+        dataset. AI drafts; people certify.</p>
+    </div>
+  </div>
+</section>
+
+<section id="arc" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">Arc · AI Industrial Engineer</div>
+    <h2>Arc learns the job —<br>and never grades its own homework.</h2>
+    <p class="lede">Arc is the AI Industrial Engineer resident in every surface of the platform —
+      educated on your machine's own documentation: it reads your
+      pages, drafts annotations and tables, and works under a rulebook built from its own history.
+      What makes it different isn't what it can do — it's what it is structurally forbidden to do.</p>
+    <div class="pillars stagger">
+      <div class="pillar">
+        <h3>It learns durably, on the record</h3>
+        <p>Work sessions are mined for lessons: candidates are extracted by one model, then attacked
+          by a second whose only job is refutation — and only a human blesses survivors into law.
+          260+ lessons have been codified this way, and a blessed correction changes behavior the
+          very next session with zero deploy. A lesson's supporting quote must trace to
+          words the human actually typed; a paraphrase is rejected outright.</p>
+      </div>
+      <div class="pillar">
+        <h3>It cannot certify itself</h3>
+        <p>Everything Arc produces stays a draft until a person verifies it against the print.
+          Certified tables seal read-only — Arc's own write tools refuse them, and so does the API.
+          A "done" claim is mechanically refused by the server while any open issue remains, and
+          after every edit Arc must judge the result from fresh pixels before it may say "fixed."</p>
+      </div>
+      <div class="pillar">
+        <h3>It heals the platform</h3>
+        <p>Every change Arc makes to its own platform lands on a branch, journaled, behind a
+          kill-switch the founder controls — and ships only through a blue-green deploy: a complete
+          copy boots in parallel, proves it serves, and only then does the cutover happen. The
+          guarantee is tested, not promised — deliberately broken code was pushed through the
+          pipeline and the live platform never flinched. That is what lets Arc sense regressions,
+          read its own logs, and fix its own code — never your documents, never your Certified
+          data — without ever betting the platform on it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="laws" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">The laws · held to the print</div>
+    <h2>Rows are the print's;<br>columns are ours.</h2>
+    <p class="lede">Every AI-extraction product asks you to trust its model. Atlas-Platform is built
+      the other way around: the AI works under laws that hold it to the print — enforced in code,
+      carried in every agent's instructions, auditable against the page. The first of them is the
+      <strong>Grain Law</strong>: a table's rows only ever mirror what your document
+      enumerates — lay any extracted table beside its page and it matches row for row, always.
+      Everything the platform <em>learns</em> lands as columns, and every derived column cites the
+      printed evidence it came from. <strong>AI can enrich your data; it can never invent a row
+      your print doesn't show.</strong></p>
+    <div class="cards stagger">
+      <div class="card">
+        <div class="tag cy">Faithfulness</div>
+        <h3>The page is the audit</h3>
+        <p>Values are captured exactly as printed — misspellings, duplicates and all. The data
+          never "cleans up" the truth, because a corrected value is one you can no longer check
+          against the source.</p>
+      </div>
+      <div class="card">
+        <div class="tag cy">Total coverage</div>
+        <h3>Nothing left behind</h3>
+        <p>Every page is swept to completion — unneeded data beats missing data, and anything left
+          uncaptured is left with a stated reason, on the record.</p>
+      </div>
+      <div class="card">
+        <div class="tag cy">Human certification</div>
+        <h3>AI drafts. A person seals.</h3>
+        <p>AI output stays a draft until a person certifies it against the print. Certified tables
+          seal read-only — the platform refuses every mutation, from the AI or anyone else, until a
+          human deliberately unseals.</p>
+      </div>
+      <div class="card">
+        <div class="tag cy">Evidence-ruled joins</div>
+        <h3>Proposed with proof, ruled by you</h3>
+        <p>Relationships between documents are measured against the live data before they become
+          law. The AI proposes with the match evidence attached; a person rules — and a wrong link
+          never silently enters the twin.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="proof" class="rv">
+  <div class="wrap">
+    <div class="eyebrow">The proving ground</div>
+    <h2>Proven end to end — on a real-world corpus,<br>not a toy dataset</h2>
+    <p class="lede">Atlas-Platform is proven against a complete industrial documentation corpus —
+      thousands of bilingual pages, scanned and vector, cross-referenced by convention, exactly as
+      machine documentation actually ships. Proven, here, means human-certified: every sealed row
+      verified against the print by a person.</p>
+    <div class="numbers stagger">
+      <div class="num"><b data-count="60" data-suffix="+">60+</b><span>documents in one machine's corpus — schematics, wiring, manuals, parameter lists, parts</span></div>
+      <div class="num"><b data-count="2700" data-suffix="+">2,700+</b><span>pages of documentation in that single machine's corpus</span></div>
+      <div class="num"><b data-count="200" data-suffix="+">200+</b><span>sheets in the schematic alone, joining the 3D scene as they're annotated</span></div>
+      <div class="num"><b data-count="1200" data-suffix="+">1,200+</b><span>conductors extracted from a single cable list — every one human-verified</span></div>
+      <div class="num"><b data-count="2800" data-suffix="+">2,800+</b><span>Certified rows sealed so far: cables, wires, terminals, parts</span></div>
+      <div class="num"><b data-count="260" data-suffix="+">260+</b><span>codified extraction lessons — mined from real sessions, adversarially verified, human-blessed</span></div>
+    </div>
+
+    <div class="band-claim rv">
+      <b>Seconds</b>
+      <span>to resolve a mystery designator across the whole corpus — two queries, live today; the
+        same answer once meant an hour with a binder.</span>
+    </div>
+    <div class="band-claim rv">
+      <b>Spare on the shelf?</b>
+      <span>built to answer it at the panel — joins your stock and replacement-parts inventory to
+        the drawings for part availability and possible substitutions, no trip to the stock
+        cage.</span>
+    </div>
+
+    <div class="origin rv">
+      <p>While fighting my own repair times as a maintenance engineer, I found that almost all of the
+        time was spent locating documentation and understanding the situation — not turning wrenches.
+        The physical fix was fast. Finding <em>which solenoid, which wire number, which page of which
+        manual</em> was the slow part. Fix the documentation problem and you fix the whole metric.
+        That's Atlas-Platform.</p>
+      <div class="sig">— Founder · maintenance engineer, 20+ years on the plant floor</div>
+    </div>
+  </div>
+</section>
+
+<section id="contact" class="final rv">
+  <div class="wrap">
+    <div class="eyebrow">Early access</div>
+    <h2>The answers are already printed.</h2>
+    <p class="sub">Every screenshot on this page is a live capture from the working platform — not
+      a mockup. Early access opens soon. If your plant runs machines whose answers still live in
+      binders, get on the list.</p>
+    <form class="wl" id="wl" autocomplete="off">
+      <input type="email" name="email" placeholder="Work email (required)" required>
+      <div class="row2">
+        <input type="text" name="name" placeholder="Name">
+        <input type="text" name="company" placeholder="Company / plant">
+      </div>
+      <input class="hp" type="text" name="hp_field" tabindex="-1" aria-hidden="true" autocomplete="off">
+      <button class="btn btn-solid" type="submit">Request early access</button>
+      <div class="wl-msg" id="wl-msg"></div>
+      <p class="wl-note">We'll use your email only to contact you about early access. And bring the
+        hard questions — where your documents live, what a pilot on your machines would look like.
+        Early access exists to answer them.</p>
+    </form>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Atlas-Platform · Creative System Design</span>
+    <span>Document · Data · Digital Twin</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* hero entrance */
+  addEventListener("load", () => document.body.classList.add("loaded"));
+  setTimeout(() => document.body.classList.add("loaded"), 900); // safety
+
+  /* scroll progress + nav shadow */
+  const bar = document.getElementById("progress"), nav = document.getElementById("nav");
+  let ticking = false;
+  const onScroll = () => {
+    if (ticking) return; ticking = true;
+    requestAnimationFrame(() => {
+      const max = document.documentElement.scrollHeight - innerHeight;
+      bar.style.width = (max > 0 ? (scrollY / max) * 100 : 0) + "%";
+      nav.classList.toggle("scrolled", scrollY > 8);
+      ticking = false;
+    });
+  };
+  addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
+
+  /* reveal on scroll */
+  const io = new IntersectionObserver((ents) => {
+    for (const e of ents) if (e.isIntersecting) {
+      e.target.classList.add("in");
+      io.unobserve(e.target);
+    }
+  }, { threshold: 0.12 });
+  document.querySelectorAll(".rv, .stagger").forEach(el => io.observe(el));
+
+  /* counters */
+  const fmt = (n) => n.toLocaleString("en-US");
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  const cio = new IntersectionObserver((ents) => {
+    for (const e of ents) if (e.isIntersecting) {
+      cio.unobserve(e.target);
+      const el = e.target, target = +el.dataset.count,
+            pre = el.dataset.prefix || "", suf = el.dataset.suffix || "";
+      if (reduced || !target) { el.textContent = pre + fmt(target) + suf; continue; }
+      const t0 = performance.now(), dur = 1600;
+      const tick = (t) => {
+        const p = Math.min(1, (t - t0) / dur);
+        el.textContent = pre + fmt(Math.round(target * ease(p))) + suf;
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }
+  }, { threshold: 0.5 });
+  document.querySelectorAll("[data-count]").forEach(el => cio.observe(el));
+
+  /* trace strip: hops light in sequence like a live query */
+  const strip = document.getElementById("tracestrip");
+  if (strip) {
+    const parts = strip.querySelectorAll(".hops code, .hops .arrow");
+    const tio = new IntersectionObserver((ents) => {
+      for (const e of ents) if (e.isIntersecting) {
+        tio.unobserve(strip);
+        parts.forEach((p, i) => setTimeout(() => p.classList.add("lit"), reduced ? 0 : 260 * i + 300));
+      }
+    }, { threshold: 0.4 });
+    tio.observe(strip);
+  }
+
+  /* card cursor glow */
+  if (!reduced) document.querySelectorAll(".card").forEach(c => {
+    c.addEventListener("pointermove", (ev) => {
+      const r = c.getBoundingClientRect();
+      c.style.setProperty("--mx", (ev.clientX - r.left) + "px");
+      c.style.setProperty("--my", (ev.clientY - r.top) + "px");
+    }, { passive: true });
+  });
+
+  /* 3D tilt on the product shot */
+  const shot = document.getElementById("shot");
+  if (shot && !reduced && matchMedia("(pointer: fine)").matches) {
+    shot.parentElement.addEventListener("pointermove", (ev) => {
+      const r = shot.getBoundingClientRect();
+      const x = (ev.clientX - r.left) / r.width - 0.5;
+      const y = (ev.clientY - r.top) / r.height - 0.5;
+      shot.style.transform = `rotateY(${(x * 3.4).toFixed(2)}deg) rotateX(${(-y * 3.4).toFixed(2)}deg)`;
+    }, { passive: true });
+    shot.parentElement.addEventListener("pointerleave", () => { shot.style.transform = ""; });
+  }
+
+  /* circuit-pulse canvas in the hero */
+  const cv = document.getElementById("fx");
+  if (cv && !reduced) {
+    const ctx = cv.getContext("2d");
+    const GRID = 44; let W = 0, H = 0, dpr = 1, pulses = [], raf = 0;
+    const resize = () => {
+      dpr = Math.min(devicePixelRatio || 1, 2);
+      W = cv.clientWidth; H = cv.clientHeight;
+      cv.width = W * dpr; cv.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    resize(); addEventListener("resize", resize, { passive: true });
+    const spawn = () => {
+      const horiz = Math.random() < 0.6;
+      const lanes = Math.floor((horiz ? H : W) / GRID);
+      if (lanes < 2) return;
+      const lane = (1 + Math.floor(Math.random() * (lanes - 1))) * GRID;
+      const dirPos = Math.random() < 0.5;
+      pulses.push({
+        horiz, lane,
+        pos: dirPos ? -60 : (horiz ? W : H) + 60,
+        v: (dirPos ? 1 : -1) * (1 + Math.random() * 1.6),
+        len: 34 + Math.random() * 60,
+        amber: Math.random() < 0.06,
+        a: 0.35 + Math.random() * 0.45,
+      });
+    };
+    let last = performance.now();
+    const frame = (t) => {
+      raf = requestAnimationFrame(frame);
+      const dt = Math.min(50, t - last); last = t;
+      ctx.clearRect(0, 0, W, H);
+      if (pulses.length < 26 && Math.random() < 0.4) spawn();
+      ctx.globalCompositeOperation = "lighter";
+      pulses = pulses.filter(p => {
+        p.pos += p.v * dt * 0.09;
+        const head = p.pos, tail = p.pos - p.len * Math.sign(p.v);
+        const gone = p.v > 0 ? tail > (p.horiz ? W : H) + 80 : head + p.len < -80;
+        if (gone) return false;
+        const [r, g, b] = p.amber ? [251, 191, 36] : [34, 211, 238];
+        const grad = p.horiz
+          ? ctx.createLinearGradient(tail, 0, head, 0)
+          : ctx.createLinearGradient(0, tail, 0, head);
+        grad.addColorStop(0, `rgba(${r},${g},${b},0)`);
+        grad.addColorStop(1, `rgba(${r},${g},${b},${p.a})`);
+        ctx.strokeStyle = grad; ctx.lineWidth = 1.6; ctx.lineCap = "round";
+        ctx.beginPath();
+        if (p.horiz) { ctx.moveTo(tail, p.lane); ctx.lineTo(head, p.lane); }
+        else { ctx.moveTo(p.lane, tail); ctx.lineTo(p.lane, head); }
+        ctx.stroke();
+        return true;
+      });
+    };
+    raf = requestAnimationFrame(frame);
+    document.addEventListener("visibilitychange", () => {
+      cancelAnimationFrame(raf);
+      if (!document.hidden) { last = performance.now(); raf = requestAnimationFrame(frame); }
+    });
+  }
+
+  /* waitlist */
+  document.getElementById("wl").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target, m = document.getElementById("wl-msg"), b = f.querySelector("button");
+    const data = Object.fromEntries(new FormData(f).entries());
+    b.disabled = true; m.className = "wl-msg"; m.textContent = "Submitting…";
+    try {
+      const r = await fetch("https://atlas-platform.cloud/waitlist", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      const j = await r.json();
+      if (j.ok) { m.className = "wl-msg ok"; m.textContent = "You're on the list — we'll be in touch."; f.reset(); }
+      else { m.className = "wl-msg err"; m.textContent = j.error || "Something went wrong — try again."; b.disabled = false; }
+    } catch { m.className = "wl-msg err"; m.textContent = "Network error — try again."; b.disabled = false; }
+  });
+})();
+</script>
+</body>
+</html>
