@@ -1,6 +1,8 @@
-# How Arc Is Educated
+# Arc — The Resident Engineer, and How It Was Educated
 
 **Training without training.** Arc — the resident AI industrial engineer — has never been fine-tuned. Its expertise lives in *files*: readable, auditable, seat-scoped lessons distilled from hundreds of supervised working sessions and certified into law by a human. Nothing a machine's documentation teaches Arc ever enters a model's weights.
+
+**And to be clear about who does the teaching: we do.** This education happened — and continues — at Atlas-Platform, under our own expert, on real industrial documents. **Arc arrives educated.** A customer never runs a training project, labels a dataset, or supervises an apprenticeship; they get the graduate. The education is also provable in a way model training never is: the knowledge files themselves are the audit trail, and every lesson quotes the human ruling that created it.
 
 This is the platform's deepest differentiator, so it deserves a full accounting.
 
@@ -48,7 +50,8 @@ Mistakes are ore, not waste. That's the flywheel.
 
 - **First attempt ever** at annotating a schematic page: three boxes, roughly half right.
 - **Hundreds of supervised sessions later**: 260+ certified lessons on the books — print grammar, blank-cell semantics, continuation conventions, bilingual-header traps, join-key discipline.
-- **Today**: Arc annotates entire schematic pages autonomously, and recent pages have passed human certification **without a single correction at the seal**.
+- **Today**: Arc annotates entire schematic pages and extracts whole documents autonomously, with correctness and completeness at or near **100% where it's actually measured — the human seal**. Recent pages have passed certification without a single correction.
+- **And the curriculum is less than a tenth complete.** The lessons certified so far cover a fraction of the planned training material; the performance above is what a tenth of the education buys.
 
 The lever gets longer with every session — and the expert's role moves up, from laborer to authority.
 

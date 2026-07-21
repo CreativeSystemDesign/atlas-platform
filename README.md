@@ -105,9 +105,13 @@ What makes Arc different isn't capability. It's **education with an audit trail*
 - **Certify:** the pipeline ends at a slate a human walks. Nothing self-promotes to law — the same discipline the platform applies to data, applied to the AI's own mind.
 - **Enforce:** certified lessons are wired into mechanisms, not prose — audit rules born as warnings that earn blocking status only at zero false positives, seat-scoped doctrine that loads exactly where it applies, live next session with zero deploy.
 
-The measurable arc: Arc's **first attempt ever** at a schematic page produced three boxes, roughly half right. **260+ certified lessons later**, it annotates entire pages autonomously — and recent pages have passed human certification **without a single correction at the seal**. When it isn't perfect, the rails catch it (audit engine, done-gate, fresh-pixel judging) — and the catch becomes the next lesson. Mistakes are ore, not waste.
+**Arc arrives educated.** This curriculum is Atlas-Platform's own — built in-house, under our own expert, on real industrial documents. Customers get the graduate, not the training job. And unlike model training, the education is *provable*: **the knowledge files themselves are the audit trail** — every lesson quotes the human ruling that created it.
 
-**Full treatment: [EDUCATION.md](EDUCATION.md)** — training without training, and why the method is publishable but the education is the moat.
+The measurable arc: Arc's **first attempt ever** at a schematic page produced three boxes, roughly half right. **260+ certified lessons later**, it annotates entire pages and extracts whole documents autonomously — with correctness and completeness at or near **100% where it's actually measured: the human seal** (recent pages have passed certification without a single correction). When it isn't perfect, the rails catch it (audit engine, done-gate, fresh-pixel judging) — and the catch becomes the next lesson. Mistakes are ore, not waste.
+
+And here's the part worth sitting with: **less than a tenth of the planned curriculum is on the books.** The seal is already this quiet. Draw the trend line.
+
+**Full treatment: [EDUCATION.md — the resident engineer, and how it was educated](EDUCATION.md)** — training without training, and why the method is publishable but the education is the moat.
 
 ## The detection stack — geometry, not pixels
 
